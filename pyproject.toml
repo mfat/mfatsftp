@@ -8,13 +8,13 @@ version = "0.1.0"
 description = "Pure-Python SFTP that speaks through your system OpenSSH (no crypto to maintain)."
 readme = "README.md"
 requires-python = ">=3.9"
-license = { text = "MIT" }
+license = { text = "GPL-3.0-or-later" }
 authors = [{ name = "Mehdi" }]
 keywords = ["sftp", "ssh", "openssh", "file-transfer", "paramiko-alternative"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
     "Operating System :: POSIX",
     "Operating System :: MacOS",
     "Programming Language :: Python :: 3",

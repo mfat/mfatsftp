@@ -38,8 +38,9 @@ with mfatsftp.connect("user@host") as sftp:
   do on your command line.
 - **No crypto to maintain** — new ciphers/KEX algorithms and crypto CVEs are
   OpenSSH's problem, not this library's.
-- **Permissively licensed (MIT).** The wire codec was written from the RFC, so
-  there's no copyleft to inherit.
+- **Original code, freely licensed.** The wire codec was written from the RFC
+  (no paramiko code), so the project carries no inherited license constraints.
+  It is released under the GPLv3 (see below).
 
 ## Authentication
 
@@ -73,4 +74,9 @@ layer, and a documented paramiko-compatibility shim.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+GNU General Public License v3.0 or later (GPLv3+) — see [LICENSE](LICENSE).
+
+> Note: GPLv3 is a strong copyleft license. Software that distributes or links
+> against `mfatsftp` must itself be GPL-compatible — a stronger requirement than
+> paramiko's LGPL. Keep this in mind when positioning it as a paramiko
+> alternative for downstream projects.

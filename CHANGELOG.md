@@ -5,6 +5,8 @@ All notable changes to this project are documented here. The format is based on
 [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Changed
+- License changed from MIT to GPL-3.0-or-later.
 
 ## [0.1.0] — initial extraction
 ### Added
