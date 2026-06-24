@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mfatsftp"
+version = "0.1.0"
+description = "Pure-Python SFTP that speaks through your system OpenSSH (no crypto to maintain)."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Mehdi" }]
+keywords = ["sftp", "ssh", "openssh", "file-transfer", "paramiko-alternative"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Internet",
+    "Topic :: System :: Networking",
+    "Typing :: Typed",
+]
+dependencies = []  # stdlib only — the only external requirement is the `ssh` binary
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.urls]
+Homepage = "https://github.com/mfat/mfatsftp"
+Source = "https://github.com/mfat/mfatsftp"
+Issues = "https://github.com/mfat/mfatsftp/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mfatsftp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
