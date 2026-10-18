@@ -143,3 +143,23 @@ def test_attributes_helpers_and_str():
     link = p.SFTPAttributes(st_mode=0o120777, longname="lrwxrwxrwx 1 u g 4 x -> y")
     assert link.is_symlink() and not link.is_file()
     assert str(link) == link.longname
+
+
+def test_extended_attributes_round_trip():
+    attr = p.SFTPAttributes(st_mode=0o100600, attr={"acl@example.com": b"\x00\x01"})
+    reader = p._Reader(p.encode_attrs(attr))
+    decoded = p.decode_attrs(reader)
+    assert decoded.attr == {"acl@example.com": b"\x00\x01"}
+    assert decoded.st_mode == 0o100600
+    assert reader.remaining() == 0
+    assert p.encode_attrs(p.SFTPAttributes()) == p.pack_uint32(0)
+
+
+def test_timeout_error_is_a_timeout():
+    import errno
+    import pickle
+
+    err = p.SFTPTimeoutError()
+    assert isinstance(err, TimeoutError) and isinstance(err, p.SFTPError)
+    assert err.errno == errno.ETIMEDOUT
+    assert type(pickle.loads(pickle.dumps(err))) is p.SFTPTimeoutError

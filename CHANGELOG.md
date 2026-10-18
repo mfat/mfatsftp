@@ -6,6 +6,24 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- Reply timeouts: `SFTPClient.settimeout()`/`gettimeout()` (also on
+  `SFTPFile`, with `setblocking`), raising the new `SFTPTimeoutError`
+  (a `TimeoutError`).
+- Line I/O on `SFTPFile`: `readline`, `readlines`, iteration, `writelines`.
+- Write buffering via `open(..., bufsize=N)` (`1` = line-buffered) and
+  `SFTPFile.set_pipelined()`; `flush()` now sends and confirms buffered data.
+- `chdir`/`getcwd` (an emulated working directory, as in paramiko).
+- `listdir_iter` (streaming directory listing).
+- `readv` on `SFTPClient` and `SFTPFile` (many ranges, one pipelined batch).
+- `SFTPClient.max_concurrent_requests` and per-call
+  `max_concurrent_prefetch_requests` on `get`/`getfo` to cap requests in flight.
+- paramiko compatibility: `prefetch=` on `get`/`getfo`, `SFTPFile.prefetch()`
+  (a no-op), `SFTPFile.chown()`, `SFTPAttributes.attr` (extended attributes,
+  previously discarded) and `SFTPAttributes.from_stat()`.
+- A garbage-collected `SFTPFile` sends its buffered writes and closes its
+  handle without waiting for replies.
+
 ## [0.2.0] - 2026-10-18
 
 Brings the client up to date with the SFTP code in sshPilot, adds the

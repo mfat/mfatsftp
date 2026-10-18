@@ -155,6 +155,21 @@ class SFTPConnectionError(SFTPError, ConnectionError):
     """``FX_NO_CONNECTION`` / ``FX_CONNECTION_LOST``: the session is gone."""
 
 
+class SFTPTimeoutError(SFTPError, TimeoutError):
+    """No reply arrived within the client's timeout (see
+    ``SFTPClient.settimeout``). ``code`` is ``FX_FAILURE``."""
+
+    def __init__(self, code: int = FX_FAILURE, message: str = "") -> None:
+        super().__init__(code, message or "SFTP request timed out")
+        self.errno = _errno.ETIMEDOUT
+
+    def __new__(cls, code: int = FX_FAILURE, message: str = "") -> "SFTPTimeoutError":
+        return super().__new__(cls, code, message or "SFTP request timed out")
+
+    def __reduce__(self):
+        return (SFTPTimeoutError, (self.code, self.message))
+
+
 _ERROR_CLASSES = {
     FX_NO_SUCH_FILE: SFTPNoSuchFileError,
     FX_PERMISSION_DENIED: SFTPPermissionError,
@@ -172,7 +187,8 @@ class SFTPAttributes:
     :mod:`stat` helpers work on ``st_mode`` directly. Fields the server did not
     send are ``None`` (``st_size``/``st_mode`` default to ``0``). Directory
     entries also carry ``filename`` and the server's ``ls -l`` style
-    ``longname``.
+    ``longname``. ``attr`` holds any extended attributes (name → raw value)
+    the server sent; it is sent back by ``setstat`` when non-empty.
     """
 
     st_size: int = 0
@@ -183,6 +199,20 @@ class SFTPAttributes:
     st_mtime: Optional[int] = None
     filename: Optional[str] = None  # set for FXP_NAME entries
     longname: Optional[str] = None
+    attr: Dict[str, bytes] = dataclasses.field(default_factory=dict)
+
+    @classmethod
+    def from_stat(cls, obj, filename: Optional[str] = None) -> "SFTPAttributes":
+        """Build attributes from an :func:`os.stat` result (paramiko-compatible)."""
+        return cls(
+            st_size=int(obj.st_size),
+            st_uid=int(obj.st_uid),
+            st_gid=int(obj.st_gid),
+            st_mode=int(obj.st_mode),
+            st_atime=int(obj.st_atime),
+            st_mtime=int(obj.st_mtime),
+            filename=filename,
+        )
 
     def is_dir(self) -> bool:
         """True for a directory (a symlink from ``lstat`` is not one)."""
@@ -274,6 +304,11 @@ def encode_attrs(attr: Optional[SFTPAttributes]) -> bytes:
     if attr.st_atime is not None and attr.st_mtime is not None:
         flags |= ATTR_ACMODTIME
         body += pack_uint32(int(attr.st_atime)) + pack_uint32(int(attr.st_mtime))
+    if attr.attr:
+        flags |= ATTR_EXTENDED
+        body += pack_uint32(len(attr.attr))
+        for name, value in attr.attr.items():
+            body += pack_string(name) + pack_string(value)
     return pack_uint32(flags) + body
 
 
@@ -295,8 +330,8 @@ def decode_attrs(reader: _Reader) -> SFTPAttributes:
     if flags & ATTR_EXTENDED:
         count = reader.uint32()
         for _ in range(count):
-            reader.string()  # type
-            reader.string()  # value
+            name = reader.text()
+            attr.attr[name] = reader.string()
     return attr
 
 

@@ -26,6 +26,8 @@ once.
 
 from __future__ import annotations
 
+import dataclasses
+import errno as _errno
 import logging
 import os
 import stat as _stat
@@ -42,6 +44,7 @@ from typing import (
     Iterator,
     List,
     Optional,
+    Sequence,
     Tuple,
     Union,
 )
@@ -103,11 +106,12 @@ class AtomicUploadItem:
 
 
 class _Pending:
-    __slots__ = ("event", "response")
+    __slots__ = ("event", "response", "rid")
 
-    def __init__(self) -> None:
+    def __init__(self, rid: int = 0) -> None:
         self.event = threading.Event()
         self.response: Optional[Tuple[int, bytes]] = None
+        self.rid = rid
 
 
 class _AdaptivePipeline:
@@ -123,19 +127,25 @@ class _AdaptivePipeline:
         "peak_pending",
         "_chunk_size",
         "_hard_cap",
+        "_floor",
         "_probe_started",
         "_probe_marker",
     )
 
-    def __init__(self, chunk_size: int) -> None:
+    def __init__(self, chunk_size: int, limit: Optional[int] = None) -> None:
         self._chunk_size = max(1, int(chunk_size))
         by_bytes = max(
             _INITIAL_PIPELINE_DEPTH,
             _MAX_BYTES_IN_FLIGHT // self._chunk_size,
         )
         self._hard_cap = min(_MAX_PENDING_REQUESTS, by_bytes)
-        self.max_pending = _INITIAL_PIPELINE_DEPTH
-        self.peak_pending = _INITIAL_PIPELINE_DEPTH
+        self._floor = _INITIAL_PIPELINE_DEPTH
+        if limit:
+            # A caller's cap bounds both the ceiling and the starting depth.
+            self._hard_cap = min(self._hard_cap, max(1, int(limit)))
+            self._floor = min(self._floor, self._hard_cap)
+        self.max_pending = self._floor
+        self.peak_pending = self._floor
         self._probe_started: Optional[float] = None
         self._probe_marker: Optional[int] = None
 
@@ -162,8 +172,8 @@ class _AdaptivePipeline:
         elif ideal < self.max_pending:
             divisor = 2 if ideal * 2 < self.max_pending else 8
             self.max_pending -= max(1, self.max_pending // divisor)
-            if self.max_pending < _INITIAL_PIPELINE_DEPTH:
-                self.max_pending = _INITIAL_PIPELINE_DEPTH
+            if self.max_pending < self._floor:
+                self.max_pending = self._floor
         if self.max_pending > self.peak_pending:
             self.peak_pending = self.max_pending
 
@@ -198,6 +208,13 @@ class SFTPClient:
         ``limits@openssh.com``, else 32 KiB).
     ``max_open_handles``
         The server's open-handle limit, or 0 if unknown.
+    ``max_concurrent_requests``
+        Optional cap on requests kept in flight by transfers and batch
+        operations (default ``None``: adaptive, see the README). Lower it for
+        servers that misbehave with many outstanding requests.
+    ``timeout``
+        Seconds to wait for each reply, or ``None`` (the default) to wait
+        indefinitely; see :meth:`settimeout`.
     """
 
     def __init__(self, stdin, stdout, on_close: Optional[Callable[[], None]] = None) -> None:
@@ -223,6 +240,9 @@ class SFTPClient:
         # Peak outstanding depth from the most recent transfer pipeline (tests /
         # diagnostics). Updated by ``iter_read`` and ``PipelinedWriter``.
         self.last_transfer_peak_pending = _INITIAL_PIPELINE_DEPTH
+        self.max_concurrent_requests: Optional[int] = None
+        self.timeout: Optional[float] = None
+        self._cwd: Optional[str] = None
 
     @classmethod
     def from_pipes(
@@ -244,6 +264,56 @@ class SFTPClient:
     def closed(self) -> bool:
         """True once the client was closed or the session was lost."""
         return self._closed
+
+    def settimeout(self, timeout: Optional[float]) -> None:
+        """Wait at most *timeout* seconds for each reply (``None``: forever).
+
+        When a reply does not arrive in time the call raises
+        :class:`~mfatsftp.SFTPTimeoutError` (a :class:`TimeoutError`) and the
+        late reply, if it ever comes, is discarded. The server may still have
+        carried the request out, so after a timeout the state of what that
+        call touched is unknown; closing the client is the safe recovery.
+        Applies to every request of this client, including file objects.
+        """
+        self.timeout = None if timeout is None else float(timeout)
+
+    def gettimeout(self) -> Optional[float]:
+        """The current reply timeout in seconds, or ``None``."""
+        return self.timeout
+
+    def chdir(self, path: Optional[str] = None) -> None:
+        """Set the directory that relative paths are resolved against.
+
+        SFTP has no working directory, so this is emulated client-side (as
+        in paramiko): afterwards every relative path passed to this client is
+        joined onto it. ``chdir(None)`` goes back to the server's default
+        (relative paths resolve against the login directory).
+
+        :raises NotADirectoryError: *path* exists but is not a directory.
+        """
+        if path is None:
+            self._cwd = None
+            return
+        if not self.stat(path).is_dir():
+            raise NotADirectoryError(_errno.ENOTDIR, os.strerror(_errno.ENOTDIR), path)
+        self._cwd = self.realpath(path)
+
+    def getcwd(self) -> Optional[str]:
+        """The directory set with :meth:`chdir`, or ``None`` if none is set."""
+        return self._cwd
+
+    def _path(self, path: str) -> str:
+        """Resolve *path* against the :meth:`chdir` directory, if any."""
+        if self._cwd is None or path.startswith("/"):
+            return path
+        if path in ("", "."):
+            return self._cwd
+        return _join_remote(self._cwd, path)
+
+    def _depth(self, default: int) -> int:
+        """*default* pipeline depth, bounded by ``max_concurrent_requests``."""
+        cap = self.max_concurrent_requests
+        return max(1, min(default, int(cap))) if cap else default
 
     # -- framing ----------------------------------------------------------
     def _read_exact(self, n: int) -> bytes:
@@ -383,7 +453,7 @@ class SFTPClient:
         with self._id_lock:
             self._next_id = (self._next_id + 1) & 0xFFFFFFFF
             rid = self._next_id
-            slot = _Pending()
+            slot = _Pending(rid)
             self._pending[rid] = slot
         # The reader marks the session closed before it wakes the pending
         # slots, so a slot registered after that sweep is woken here.
@@ -392,9 +462,13 @@ class SFTPClient:
         self._write_packet(proto.build_request(ptype, rid, payload))
         return slot
 
-    @staticmethod
-    def _wait(slot: _Pending) -> Tuple[int, bytes]:
-        slot.event.wait()
+    def _wait(self, slot: _Pending) -> Tuple[int, bytes]:
+        if not slot.event.wait(self.timeout):
+            # Forget the request: a late reply is dropped by the reader.
+            self._pending.pop(slot.rid, None)
+            raise proto.SFTPTimeoutError(
+                proto.FX_FAILURE, f"no reply within {self.timeout} seconds"
+            )
         if slot.response is None:
             raise proto.SFTPError(proto.FX_CONNECTION_LOST, "SFTP session lost")
         return slot.response
@@ -411,7 +485,9 @@ class SFTPClient:
     # -- high level operations -------------------------------------------
     def realpath(self, path: str) -> str:
         """The server's canonical absolute form of *path* (``"."`` gives the
-        login directory). OpenSSH resolves symlinks and ``..``."""
+        login directory, or the :meth:`chdir` directory). OpenSSH resolves
+        symlinks and ``..``."""
+        path = self._path(path)
         resp = self._request(proto.FXP_REALPATH, proto.pack_string(path))
         ptype, payload = resp
         if ptype == proto.FXP_NAME:
@@ -423,11 +499,11 @@ class SFTPClient:
 
     def stat(self, path: str) -> proto.SFTPAttributes:
         """Attributes of *path*, following symlinks."""
-        return self._attrs(self._request(proto.FXP_STAT, proto.pack_string(path)))
+        return self._attrs(self._request(proto.FXP_STAT, proto.pack_string(self._path(path))))
 
     def lstat(self, path: str) -> proto.SFTPAttributes:
         """Attributes of *path* itself; a symlink is not followed."""
-        return self._attrs(self._request(proto.FXP_LSTAT, proto.pack_string(path)))
+        return self._attrs(self._request(proto.FXP_LSTAT, proto.pack_string(self._path(path))))
 
     def fstat(self, handle: bytes) -> proto.SFTPAttributes:
         """Attributes of an open handle (see :attr:`SFTPFile.handle`)."""
@@ -471,11 +547,13 @@ class SFTPClient:
                 if fatal is None:
                     fatal = exc
 
+        depth = self._depth(_META_PIPELINE_DEPTH)
         for index, path in enumerate(paths):
             if fatal is not None:
                 break
-            inflight.append((index, self._send(proto.FXP_STAT, proto.pack_string(path))))
-            if len(inflight) >= _META_PIPELINE_DEPTH:
+            request = proto.pack_string(self._path(path))
+            inflight.append((index, self._send(proto.FXP_STAT, request)))
+            if len(inflight) >= depth:
                 _drain_one()
         while inflight:
             _drain_one()
@@ -499,30 +577,38 @@ class SFTPClient:
         left out), each with ``filename`` set. Order is the server's.
 
         Entry attributes describe the entry itself: a symlink is reported as
-        a symlink, as with :meth:`lstat`.
+        a symlink, as with :meth:`lstat`. Several READDIRs are kept in flight
+        (see :meth:`listdir_iter`).
+        """
+        return list(self.listdir_iter(path))
 
-        Several READDIRs are kept in flight.
+    def listdir_iter(
+        self, path: str = ".", read_aheads: int = _READDIR_AHEAD
+    ) -> Iterator[proto.SFTPAttributes]:
+        """Yield the entries of directory *path* as they arrive (as
+        :meth:`listdir_attr`, without holding the whole listing in memory).
 
         Each READDIR returns the next batch (OpenSSH: ~100 names) or EOF, and
-        a server handles requests on one handle in order, so a large directory
-        costs a round trip per ``_READDIR_AHEAD`` batches instead of per batch.
+        a server handles requests on one handle in order, so *read_aheads*
+        READDIRs are kept in flight: a large directory costs a round trip per
+        *read_aheads* batches instead of per batch. The directory is opened
+        on the first ``next()``; stopping early closes it.
         """
-        resp = self._request(proto.FXP_OPENDIR, proto.pack_string(path))
+        resp = self._request(proto.FXP_OPENDIR, proto.pack_string(self._path(path)))
         handle = self._handle(resp)
-        entries: List[proto.SFTPAttributes] = []
         request = proto.pack_string(handle)
+        ahead = self._depth(max(1, int(read_aheads)))
         inflight: Deque[_Pending] = deque()
         try:
             while True:
-                while len(inflight) < _READDIR_AHEAD:
+                while len(inflight) < ahead:
                     inflight.append(self._send(proto.FXP_READDIR, request))
                 ptype, payload = self._wait(inflight.popleft())
                 if ptype == proto.FXP_NAME:
                     _, names = proto.parse_name(payload)
                     for attr in names:
-                        if attr.filename in (".", ".."):
-                            continue
-                        entries.append(attr)
+                        if attr.filename not in (".", ".."):
+                            yield attr
                 elif ptype == proto.FXP_STATUS:
                     _, code, message = proto.parse_status(payload)
                     if code == proto.FX_EOF:
@@ -530,12 +616,15 @@ class SFTPClient:
                     raise proto.SFTPError(code, message)
                 else:
                     raise proto.SFTPError(proto.FX_BAD_MESSAGE, "expected NAME")
-            # The read-aheads past EOF answer EOF; settle them before CLOSE.
-            while inflight:
-                self._wait(inflight.popleft())
         finally:
+            # Replies on one handle arrive in order and must settle before
+            # CLOSE, also when the caller stopped early or a reply failed.
+            while inflight:
+                try:
+                    self._wait(inflight.popleft())
+                except Exception:
+                    break
             self.close_handle(handle)
-        return entries
 
     def listdir(self, path: str = ".") -> List[str]:
         """Names of the entries in directory *path* (paramiko-compatible)."""
@@ -580,7 +669,9 @@ class SFTPClient:
         if mode is not None:
             attr = proto.SFTPAttributes(st_mode=int(mode) & 0o7777)
         self._expect_ok(
-            self._request(proto.FXP_MKDIR, proto.pack_string(path) + proto.encode_attrs(attr))
+            self._request(
+                proto.FXP_MKDIR, proto.pack_string(self._path(path)) + proto.encode_attrs(attr)
+            )
         )
 
     def makedirs(self, path: str, mode: Optional[int] = None) -> None:
@@ -616,11 +707,11 @@ class SFTPClient:
 
     def rmdir(self, path: str) -> None:
         """Remove the empty directory *path*."""
-        self._expect_ok(self._request(proto.FXP_RMDIR, proto.pack_string(path)))
+        self._expect_ok(self._request(proto.FXP_RMDIR, proto.pack_string(self._path(path))))
 
     def remove(self, path: str) -> None:
         """Remove the file or symlink *path* (not a directory)."""
-        self._expect_ok(self._request(proto.FXP_REMOVE, proto.pack_string(path)))
+        self._expect_ok(self._request(proto.FXP_REMOVE, proto.pack_string(self._path(path))))
 
     def rmtree(self, path: str) -> None:
         """Delete *path* and everything below it, like ``rm -r``.
@@ -711,11 +802,12 @@ class SFTPClient:
                 if not continue_on_error and fatal is None:
                     fatal = exc
 
+        depth = self._depth(_REMOVE_PIPELINE_DEPTH)
         for path in paths:
             if fatal is not None:
                 break
-            inflight.append((path, self._send(ptype, proto.pack_string(path))))
-            if len(inflight) >= _REMOVE_PIPELINE_DEPTH:
+            inflight.append((path, self._send(ptype, proto.pack_string(self._path(path)))))
+            if len(inflight) >= depth:
                 _drain_one()
         while inflight:
             _drain_one()
@@ -730,7 +822,8 @@ class SFTPClient:
         use :meth:`posix_rename` or :meth:`atomic_rename` to replace it."""
         self._expect_ok(
             self._request(
-                proto.FXP_RENAME, proto.pack_string(old) + proto.pack_string(new)
+                proto.FXP_RENAME,
+                proto.pack_string(self._path(old)) + proto.pack_string(self._path(new)),
             )
         )
 
@@ -748,8 +841,8 @@ class SFTPClient:
         """
         payload = (
             proto.pack_string("posix-rename@openssh.com")
-            + proto.pack_string(old)
-            + proto.pack_string(new)
+            + proto.pack_string(self._path(old))
+            + proto.pack_string(self._path(new))
         )
         self._expect_ok(self._request(proto.FXP_EXTENDED, payload))
 
@@ -804,6 +897,15 @@ class SFTPClient:
         it to abort. On failure temps are removed and the error is raised;
         items in earlier windows stay uploaded.
         """
+        if self._cwd is not None:
+            items = [
+                dataclasses.replace(
+                    item,
+                    remote_temp=self._path(item.remote_temp),
+                    remote_dst=self._path(item.remote_dst),
+                )
+                for item in items
+            ]
         window = self._meta_window()
         for start in range(0, len(items), window):
             if check_cancel is not None:
@@ -816,8 +918,8 @@ class SFTPClient:
         # Concurrent transfers share this session, so take only a slice of
         # the server's handle limit when it advertises one.
         if self.max_open_handles:
-            return max(1, min(_META_PIPELINE_DEPTH, self.max_open_handles // 4))
-        return _META_PIPELINE_DEPTH
+            return self._depth(max(1, min(_META_PIPELINE_DEPTH, self.max_open_handles // 4)))
+        return self._depth(_META_PIPELINE_DEPTH)
 
     def _send_all(self, requests: List[Tuple[int, bytes]]) -> List[object]:
         """Send *requests* together and wait for every reply.
@@ -1096,12 +1198,16 @@ class SFTPClient:
         if mode is not None:
             attr = proto.SFTPAttributes(st_mode=int(mode) & 0o7777)
         errors: List[Optional[BaseException]] = []
-        for start in range(0, len(paths), _META_PIPELINE_DEPTH):
+        depth = self._depth(_META_PIPELINE_DEPTH)
+        for start in range(0, len(paths), depth):
             errors.extend(
                 self._status_results(
                     [
-                        (proto.FXP_MKDIR, proto.pack_string(path) + proto.encode_attrs(attr))
-                        for path in paths[start : start + _META_PIPELINE_DEPTH]
+                        (
+                            proto.FXP_MKDIR,
+                            proto.pack_string(self._path(path)) + proto.encode_attrs(attr),
+                        )
+                        for path in paths[start : start + depth]
                     ]
                 )
             )
@@ -1125,7 +1231,7 @@ class SFTPClient:
 
     def _listdir_window(self, paths: List[str]) -> List[List[proto.SFTPAttributes]]:
         handles, error = self._open_all(
-            [(proto.FXP_OPENDIR, proto.pack_string(path)) for path in paths]
+            [(proto.FXP_OPENDIR, proto.pack_string(self._path(path))) for path in paths]
         )
         entries: List[List[proto.SFTPAttributes]] = [[] for _ in paths]
         try:
@@ -1134,7 +1240,10 @@ class SFTPClient:
             active = list(range(len(paths)))
             # Two READDIRs finish a typical small directory (names, then EOF)
             # in one round trip; directories still going get the full ahead.
-            ahead = 2
+            # Under a concurrency cap the window already holds that many
+            # directories, so each gets one READDIR per round.
+            capped = bool(self.max_concurrent_requests)
+            ahead = 1 if capped else 2
             while active:
                 sent: List[Tuple[int, object]] = []
                 for index in active:
@@ -1172,7 +1281,7 @@ class SFTPClient:
                 if error is not None:
                     raise error
                 active = [index for index in active if index not in done]
-                ahead = _READDIR_AHEAD
+                ahead = 1 if capped else _READDIR_AHEAD
         finally:
             self._close_all(handles)
         return entries
@@ -1211,7 +1320,7 @@ class SFTPClient:
             [
                 (
                     proto.FXP_OPEN,
-                    proto.pack_string(path)
+                    proto.pack_string(self._path(path))
                     + proto.pack_uint32(proto.FXF_READ)
                     + proto.encode_attrs(None),
                 )
@@ -1270,8 +1379,8 @@ class SFTPClient:
         """
         payload = (
             proto.pack_string("hardlink@openssh.com")
-            + proto.pack_string(old)
-            + proto.pack_string(new)
+            + proto.pack_string(self._path(old))
+            + proto.pack_string(self._path(new))
         )
         self._expect_ok(self._request(proto.FXP_EXTENDED, payload))
 
@@ -1319,7 +1428,7 @@ class SFTPClient:
     def statvfs(self, path: str) -> proto.SFTPStatVFS:
         """Filesystem sizes for *path* (OpenSSH extension), like
         :func:`os.statvfs`."""
-        payload = proto.pack_string("statvfs@openssh.com") + proto.pack_string(path)
+        payload = proto.pack_string("statvfs@openssh.com") + proto.pack_string(self._path(path))
         ptype, body = self._request(proto.FXP_EXTENDED, payload)
         if ptype == proto.FXP_STATUS:
             _, code, message = proto.parse_status(body)
@@ -1364,7 +1473,9 @@ class SFTPClient:
         ``st_size`` when non-zero (use :meth:`truncate` for size 0).
         """
         self._expect_ok(
-            self._request(proto.FXP_SETSTAT, proto.pack_string(path) + proto.encode_attrs(attr))
+            self._request(
+                proto.FXP_SETSTAT, proto.pack_string(self._path(path)) + proto.encode_attrs(attr)
+            )
         )
 
     def fsetstat(self, handle: bytes, attr: proto.SFTPAttributes) -> None:
@@ -1397,7 +1508,9 @@ class SFTPClient:
     def truncate(self, path: str, size: int) -> None:
         """Set *path*'s size to *size* bytes, cutting or zero-extending it."""
         self._expect_ok(
-            self._request(proto.FXP_SETSTAT, proto.pack_string(path) + _size_attrs(size))
+            self._request(
+                proto.FXP_SETSTAT, proto.pack_string(self._path(path)) + _size_attrs(size)
+            )
         )
 
     def symlink(self, target_path: str, link_path: str) -> None:
@@ -1413,13 +1526,15 @@ class SFTPClient:
         self._expect_ok(
             self._request(
                 proto.FXP_SYMLINK,
-                proto.pack_string(target_path) + proto.pack_string(link_path),
+                # The target is stored verbatim: a relative target is
+                # relative to the link, not to the chdir directory.
+                proto.pack_string(target_path) + proto.pack_string(self._path(link_path)),
             )
         )
 
     def readlink(self, path: str) -> str:
         """The target of symlink *path*, unresolved."""
-        resp = self._request(proto.FXP_READLINK, proto.pack_string(path))
+        resp = self._request(proto.FXP_READLINK, proto.pack_string(self._path(path)))
         ptype, payload = resp
         if ptype == proto.FXP_NAME:
             _, entries = proto.parse_name(payload)
@@ -1440,7 +1555,11 @@ class SFTPClient:
 
         Close it with :meth:`close_handle`. Prefer :meth:`open`.
         """
-        payload = proto.pack_string(path) + proto.pack_uint32(pflags) + proto.encode_attrs(attr)
+        payload = (
+            proto.pack_string(self._path(path))
+            + proto.pack_uint32(pflags)
+            + proto.encode_attrs(attr)
+        )
         return self._handle(self._request(proto.FXP_OPEN, payload))
 
     def open(
@@ -1455,9 +1574,13 @@ class SFTPClient:
 
         *mode* follows :func:`open`: ``r``, ``r+``, ``w``, ``w+``, ``a``,
         ``a+``, ``x``, ``x+``. Data is always bytes; a ``b`` (or ``t``) in
-        *mode* is accepted and ignored, as in paramiko. *bufsize* is accepted
-        for paramiko compatibility and ignored (I/O is unbuffered and
-        pipelined).
+        *mode* is accepted and ignored, as in paramiko.
+
+        *bufsize* controls write buffering, as in paramiko: ``-1`` (default)
+        or ``0`` sends each ``write()`` at once, ``1`` buffers until a
+        newline, and a larger value buffers up to that many bytes. Buffered
+        data is sent by :meth:`SFTPFile.flush`, any read/seek/stat, and
+        :meth:`SFTPFile.close`. Reads are always buffered for ``readline``.
 
         ``create_mode`` sets the permissions a newly created file gets in the
         same OPEN request (the server still applies its umask), saving the
@@ -1472,7 +1595,7 @@ class SFTPClient:
         if create_mode is not None:
             attr = proto.SFTPAttributes(st_mode=int(create_mode) & 0o7777)
         handle = self.open_handle(path, pflags, attr)
-        sftp_file = SFTPFile(self, handle, mode)
+        sftp_file = SFTPFile(self, handle, mode, bufsize)
         if pflags & proto.FXF_APPEND:
             try:
                 sftp_file.seek(0, os.SEEK_END)
@@ -1527,7 +1650,12 @@ class SFTPClient:
         return self._send(proto.FXP_WRITE, payload)
 
     def iter_read(
-        self, handle: bytes, offset: int = 0, length: Optional[int] = None
+        self,
+        handle: bytes,
+        offset: int = 0,
+        length: Optional[int] = None,
+        *,
+        max_concurrent_requests: Optional[int] = None,
     ) -> Iterator[bytes]:
         """Yield a file's bytes in order from ``offset``, up to ``length`` or EOF.
 
@@ -1537,10 +1665,13 @@ class SFTPClient:
         caps a READ at ~255 KiB), so a short reply is followed up for the rest
         of its chunk; only an empty reply means EOF. The first short reply also
         resizes the chunks to its length, in flight and to come.
+
+        *max_concurrent_requests* caps the READs in flight for this call
+        (default: the client's ``max_concurrent_requests``).
         """
         step = self.max_read_length
         end = None if length is None else offset + length
-        pipeline = _AdaptivePipeline(step)
+        pipeline = _AdaptivePipeline(step, max_concurrent_requests or self.max_concurrent_requests)
         inflight: Deque[Tuple[int, int, _Pending]] = deque()
         next_offset = position = offset
         split = False
@@ -1608,6 +1739,46 @@ class SFTPClient:
                 pieces.append((piece, piece_size, self._send_read(handle, piece, piece_size)))
         return pieces
 
+    def readv(
+        self,
+        handle: bytes,
+        chunks: Sequence[Tuple[int, int]],
+        *,
+        max_concurrent_requests: Optional[int] = None,
+    ) -> List[bytes]:
+        """Read many ``(offset, length)`` ranges of an open file at once.
+
+        Returns one ``bytes`` per range, in order; a range reaching past EOF
+        comes back short. All READs are pipelined (at most
+        *max_concurrent_requests*, default 100 or the client's cap, in
+        flight), so many scattered ranges cost about one round trip per
+        window rather than one per range.
+        """
+        step = max(1, int(self.max_read_length))
+        window = max_concurrent_requests or self._depth(_META_PIPELINE_DEPTH)
+        parts: List[List[bytes]] = [[] for _ in chunks]
+        inflight: Deque[Tuple[int, int, int, _Pending]] = deque()
+
+        def _drain_one() -> None:
+            index, piece, size, slot = inflight.popleft()
+            data = self._read_data(self._wait(slot))[:size]
+            if 0 < len(data) < size:
+                # Short reply before EOF: fetch the rest of this piece.
+                rest = self.iter_read(handle, piece + len(data), size - len(data))
+                data += b"".join(rest)
+            parts[index].append(data)
+
+        for index, (chunk_offset, chunk_length) in enumerate(chunks):
+            chunk_end = int(chunk_offset) + max(0, int(chunk_length))
+            for piece in range(int(chunk_offset), chunk_end, step):
+                size = min(step, chunk_end - piece)
+                inflight.append((index, piece, size, self._send_read(handle, piece, size)))
+                if len(inflight) >= window:
+                    _drain_one()
+        while inflight:
+            _drain_one()
+        return [b"".join(chunk_parts) for chunk_parts in parts]
+
     def pipelined_writer(
         self,
         handle: bytes,
@@ -1632,12 +1803,17 @@ class SFTPClient:
         remotepath: str,
         fl: IO[bytes],
         callback: Optional[ProgressCallback] = None,
+        prefetch: bool = True,
+        max_concurrent_prefetch_requests: Optional[int] = None,
     ) -> int:
         """Download *remotepath* into the open binary file object *fl*.
 
         Reads are pipelined. *callback*, if given, is called as
         ``callback(bytes_done, total)`` as data arrives (*total* is 0 if the
-        remote size is unknown). Returns the number of bytes written.
+        remote size is unknown). *max_concurrent_prefetch_requests* caps the
+        READs in flight (paramiko's name; default: adaptive). *prefetch* is
+        accepted for paramiko compatibility and ignored: reads are always
+        pipelined. Returns the number of bytes written.
         """
         handle = self.open_handle(remotepath, proto.FXF_READ)
         done = 0
@@ -1648,7 +1824,10 @@ class SFTPClient:
                     total = int(self.fstat(handle).st_size or 0)
                 except proto.SFTPError:
                     pass
-            for chunk in self.iter_read(handle):
+            chunks = self.iter_read(
+                handle, max_concurrent_requests=max_concurrent_prefetch_requests
+            )
+            for chunk in chunks:
                 fl.write(chunk)
                 done += len(chunk)
                 if callback is not None:
@@ -1662,14 +1841,18 @@ class SFTPClient:
         remotepath: str,
         localpath: PathLike,
         callback: Optional[ProgressCallback] = None,
+        prefetch: bool = True,
+        max_concurrent_prefetch_requests: Optional[int] = None,
     ) -> int:
         """Download *remotepath* to the local file *localpath*.
 
-        The local file is created or truncated. See :meth:`getfo` for
-        *callback*. Returns the number of bytes transferred.
+        The local file is created or truncated. See :meth:`getfo` for the
+        other arguments. Returns the number of bytes transferred.
         """
         with open(localpath, "wb") as fh:
-            return self.getfo(remotepath, fh, callback)
+            return self.getfo(
+                remotepath, fh, callback, prefetch, max_concurrent_prefetch_requests
+            )
 
     def putfo(
         self,
@@ -1938,7 +2121,9 @@ class PipelinedWriter:
         self._handle = handle
         self.offset = offset
         self._inflight: Deque[Tuple[int, _Pending]] = deque()
-        self._pipeline = _AdaptivePipeline(client.max_write_length)
+        self._pipeline = _AdaptivePipeline(
+            client.max_write_length, getattr(client, "max_concurrent_requests", None)
+        )
         self._acked_through = offset
         self._on_ack = on_ack
 
@@ -1985,18 +2170,38 @@ class PipelinedWriter:
 class SFTPFile:
     """A remote file opened with :meth:`SFTPClient.open`.
 
-    Behaves like a binary, unbuffered Python file: it tracks its own position
-    for ``read()``/``write()``, supports ``seek()``/``tell()``, and closes on
-    leaving a ``with`` block. Reads and writes larger than one chunk are
-    pipelined, so ``f.read()`` of a large file is fast.
+    Behaves like a binary Python file: it tracks its own position for
+    ``read()``/``write()``, supports ``seek()``/``tell()``, line iteration
+    (``for line in f``, ``readline``, ``readlines``) and closes on leaving a
+    ``with`` block. Large reads and writes are pipelined.
+
+    Writes are unbuffered unless the file was opened with a *bufsize* (see
+    :meth:`SFTPClient.open`) or :meth:`set_pipelined` is on; buffered or
+    pipelined data is sent, and any write error raised, at the next
+    :meth:`flush`, read, seek, stat or :meth:`close`.
+
+    A file that is garbage-collected without being closed has its buffered
+    writes sent and its handle closed then, without waiting for replies, so
+    errors go unnoticed; close files explicitly.
     """
 
-    def __init__(self, client: "SFTPClient", handle: bytes, mode: str = "r") -> None:
+    def __init__(
+        self, client: "SFTPClient", handle: bytes, mode: str = "r", bufsize: int = -1
+    ) -> None:
         self._client = client
         self._handle = handle
-        self._offset = 0
         self._closed = False
         self.mode = mode
+        self._bufsize = int(bufsize)
+        # Logical position. Unsent writes end here; buffered read-ahead
+        # (``_rbuffer[_rpos:]``) starts here.
+        self._offset = 0
+        self._rbuffer = b""
+        self._rpos = 0
+        self._wbuffer = bytearray()
+        self._pipelined = False
+        # A writer with WRITEs still awaiting their replies (pipelined mode).
+        self._writer: Optional[PipelinedWriter] = None
 
     @property
     def handle(self) -> bytes:
@@ -2011,42 +2216,185 @@ class SFTPFile:
         if self._closed:
             raise ValueError("I/O operation on closed file")
 
+    # -- write side -------------------------------------------------------
+    def _send_buffer(self) -> None:
+        """Send buffered writes; wait for them unless pipelined."""
+        if not self._wbuffer:
+            return
+        data = bytes(self._wbuffer)
+        self._wbuffer.clear()
+        start = self._offset - len(data)
+        writer, self._writer = self._writer, None
+        if writer is None or writer.offset != start:
+            if writer is not None:
+                writer.flush()
+            writer = self._client.pipelined_writer(self._handle, start)
+        writer.write(data)
+        if self._pipelined:
+            self._writer = writer
+        else:
+            writer.flush()
+
+    def _sync(self) -> None:
+        """Send buffered writes and wait until all are acknowledged."""
+        self._send_buffer()
+        if self._writer is not None:
+            writer, self._writer = self._writer, None
+            writer.flush()
+
+    def write(self, data: bytes) -> int:
+        """Write *data* at the current position; returns ``len(data)``.
+
+        Unbuffered and not pipelined (the default), it returns once the
+        server has confirmed every chunk.
+        """
+        self._check_open()
+        self._drop_read_ahead()
+        self._wbuffer += data
+        self._offset += len(data)
+        if self._bufsize > 1:
+            if len(self._wbuffer) >= self._bufsize:
+                self._send_buffer()
+        elif self._bufsize == 1:
+            if b"\n" in data:
+                self._send_buffer()
+        else:
+            self._send_buffer()
+        return len(data)
+
+    def writelines(self, lines) -> None:
+        """Write each item of *lines* (no separators are added)."""
+        for line in lines:
+            self.write(line)
+
+    def flush(self) -> None:
+        """Send buffered writes and wait until the server confirms them;
+        raises the first write error, if any."""
+        self._check_open()
+        self._sync()
+
+    def set_pipelined(self, pipelined: bool = True) -> None:
+        """Don't wait for each ``write()`` to be confirmed (paramiko).
+
+        Writes are then sent with a window of requests in flight and an
+        error surfaces from a later call: the next read, seek, stat,
+        :meth:`flush` or :meth:`close`. Turning it off waits for what is
+        outstanding.
+        """
+        if not pipelined:
+            self._sync()
+        self._pipelined = bool(pipelined)
+
+    # -- read side --------------------------------------------------------
+    def _drop_read_ahead(self) -> None:
+        self._rbuffer = b""
+        self._rpos = 0
+
+    def _take(self, count: int) -> bytes:
+        data = self._rbuffer[self._rpos : self._rpos + count]
+        self._rpos += len(data)
+        self._offset += len(data)
+        if self._rpos >= len(self._rbuffer):
+            self._drop_read_ahead()
+        return data
+
     def read(self, size: Optional[int] = None) -> bytes:
         """Read up to *size* bytes, or to EOF when *size* is ``None`` or
         negative. Returns ``b""`` at EOF."""
         self._check_open()
+        self._sync()
         if size is not None and size < 0:
             size = None
-        chunks = []
-        for chunk in self._client.iter_read(self._handle, self._offset, size):
-            chunks.append(chunk)
+        buffered = len(self._rbuffer) - self._rpos
+        if size is not None and size <= buffered:
+            return self._take(size)
+        parts = [self._take(buffered)]
+        remaining = None if size is None else size - buffered
+        for chunk in self._client.iter_read(self._handle, self._offset, remaining):
+            parts.append(chunk)
             self._offset += len(chunk)
-        return b"".join(chunks)
+        return b"".join(parts)
 
     def readinto(self, buffer) -> int:
         """Read into a writable buffer; returns the number of bytes read.
 
-        Lets :class:`io.BufferedReader` wrap the file, e.g. for text lines:
-        ``io.TextIOWrapper(io.BufferedReader(f), encoding="utf-8")``.
+        Lets :class:`io.BufferedReader` / :class:`io.TextIOWrapper` wrap the
+        file, e.g. for decoded text lines.
         """
         view = memoryview(buffer).cast("B")
         data = self.read(len(view))
         view[: len(data)] = data
         return len(data)
 
-    def write(self, data: bytes) -> int:
-        """Write *data* at the current position; returns ``len(data)``.
-        Returns once the server has confirmed every chunk."""
-        self._check_open()
-        writer = self._client.pipelined_writer(self._handle, self._offset)
-        writer.write(data)
-        writer.flush()
-        self._offset = writer.offset
-        return len(data)
+    def readline(self, size: Optional[int] = None) -> bytes:
+        """Read one line, up to and including ``b"\\n"`` (at most *size*
+        bytes if given). Returns ``b""`` at EOF.
 
+        Data is fetched a server-sized chunk (~255 KiB on OpenSSH) at a time,
+        so iterating over a file costs a round trip per chunk, not per line.
+        """
+        self._check_open()
+        self._sync()
+        limit = None if size is None or size < 0 else size
+        while True:
+            newline = self._rbuffer.find(b"\n", self._rpos)
+            available = len(self._rbuffer) - self._rpos
+            if newline >= 0:
+                count = newline + 1 - self._rpos
+                return self._take(count if limit is None else min(count, limit))
+            if limit is not None and available >= limit:
+                return self._take(limit)
+            chunk = self._client.read(
+                self._handle, self._offset + available, self._client.max_read_length
+            )
+            if not chunk:
+                return self._take(available)
+            self._rbuffer = self._rbuffer[self._rpos :] + chunk
+            self._rpos = 0
+
+    def readlines(self, sizehint: Optional[int] = None) -> List[bytes]:
+        """Read lines until EOF (or until about *sizehint* bytes are read)."""
+        lines: List[bytes] = []
+        total = 0
+        for line in self:
+            lines.append(line)
+            total += len(line)
+            if sizehint is not None and 0 < sizehint <= total:
+                break
+        return lines
+
+    def __iter__(self) -> "SFTPFile":
+        return self
+
+    def __next__(self) -> bytes:
+        line = self.readline()
+        if not line:
+            raise StopIteration
+        return line
+
+    def readv(
+        self,
+        chunks: Sequence[Tuple[int, int]],
+        max_concurrent_prefetch_requests: Optional[int] = None,
+    ) -> List[bytes]:
+        """Read many ``(offset, length)`` ranges at once; see
+        :meth:`SFTPClient.readv`. The file position is unchanged."""
+        self._check_open()
+        self._sync()
+        return self._client.readv(
+            self._handle, chunks, max_concurrent_requests=max_concurrent_prefetch_requests
+        )
+
+    def prefetch(
+        self, file_size: Optional[int] = None, max_concurrent_requests: Optional[int] = None
+    ) -> None:
+        """No-op kept for paramiko compatibility: reads are always pipelined."""
+
+    # -- position and metadata ---------------------------------------------
     def seek(self, offset: int, whence: int = os.SEEK_SET) -> int:
         """Move the position, like :meth:`io.IOBase.seek`; returns it."""
         self._check_open()
+        self._sync()
         if whence == os.SEEK_SET:
             position = offset
         elif whence == os.SEEK_CUR:
@@ -2057,6 +2405,7 @@ class SFTPFile:
             raise ValueError(f"invalid whence: {whence!r}")
         if position < 0:
             raise ValueError("negative seek position")
+        self._drop_read_ahead()
         self._offset = position
         return position
 
@@ -2065,15 +2414,27 @@ class SFTPFile:
         return self._offset
 
     def stat(self) -> proto.SFTPAttributes:
-        """Attributes of the open file."""
+        """Attributes of the open file (after sending buffered writes)."""
+        self._check_open()
+        self._sync()
         return self._client.fstat(self._handle)
 
     def chmod(self, mode: int) -> None:
         """Change the open file's permission bits."""
+        self._check_open()
+        self._sync()
         self._client.fsetstat(self._handle, proto.SFTPAttributes(st_mode=int(mode) & 0o7777))
+
+    def chown(self, uid: int, gid: int) -> None:
+        """Change the open file's numeric owner and group."""
+        self._check_open()
+        self._sync()
+        self._client.fsetstat(self._handle, proto.SFTPAttributes(st_uid=int(uid), st_gid=int(gid)))
 
     def utime(self, times: Optional[Tuple[float, float]] = None) -> None:
         """Set access and modification times; see :meth:`SFTPClient.utime`."""
+        self._check_open()
+        self._sync()
         if times is None:
             now = time.time()
             times = (now, now)
@@ -2086,8 +2447,10 @@ class SFTPFile:
         """Resize the file to *size* bytes (default: the current position).
         The position is unchanged. Returns the new size."""
         self._check_open()
+        self._sync()
         if size is None:
             size = self._offset
+        self._drop_read_ahead()
         self._client._expect_ok(
             self._client._request(
                 proto.FXP_FSETSTAT, proto.pack_string(self._handle) + _size_attrs(size)
@@ -2095,8 +2458,20 @@ class SFTPFile:
         )
         return size
 
-    def flush(self) -> None:
-        """No-op: writes are confirmed before ``write()`` returns."""
+    # -- timeouts (session-wide, as in paramiko) ----------------------------
+    def settimeout(self, timeout: Optional[float]) -> None:
+        """Set the reply timeout of the whole client; see
+        :meth:`SFTPClient.settimeout`."""
+        self._client.settimeout(timeout)
+
+    def gettimeout(self) -> Optional[float]:
+        """The client's reply timeout."""
+        return self._client.gettimeout()
+
+    def setblocking(self, blocking: bool) -> None:
+        """``setblocking(False)`` is ``settimeout(0.0)``;
+        ``setblocking(True)`` is ``settimeout(None)``."""
+        self.settimeout(None if blocking else 0.0)
 
     def readable(self) -> bool:
         return "r" in self.mode or "+" in self.mode
@@ -2108,9 +2483,15 @@ class SFTPFile:
         return True
 
     def close(self) -> None:
-        """Close the remote handle. Safe to call more than once."""
-        if not self._closed:
-            self._closed = True
+        """Send any buffered writes and close the remote handle. Safe to
+        call more than once. A write error is raised after the handle is
+        closed."""
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._sync()
+        finally:
             self._client.close_handle(self._handle)
 
     def __enter__(self) -> "SFTPFile":
@@ -2118,6 +2499,28 @@ class SFTPFile:
 
     def __exit__(self, *exc) -> None:
         self.close()
+
+    def __del__(self) -> None:
+        if getattr(self, "_closed", True):
+            return
+        client = self._client
+        self._closed = True
+        if client.closed:
+            return
+        # Never wait for a reply here: a finalizer may run on the reader
+        # thread itself, or at interpreter exit after daemon threads stopped.
+        # Requests on one handle are handled in order, so the buffered
+        # writes land before the CLOSE.
+        try:
+            data = bytes(self._wbuffer)
+            self._wbuffer.clear()
+            start = self._offset - len(data)
+            step = max(1, int(client.max_write_length))
+            for position in range(0, len(data), step):
+                client._send_write(self._handle, start + position, data[position : position + step])
+            client._send(proto.FXP_CLOSE, proto.pack_string(self._handle))
+        except Exception:
+            pass
 
 
 # ``open()`` modes (letters sorted, ``b``/``t`` removed) → OPEN pflags.

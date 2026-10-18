@@ -28,6 +28,7 @@ from .protocol import (
     SFTPNoSuchFileError,
     SFTPPermissionError,
     SFTPStatVFS,
+    SFTPTimeoutError,
 )
 from .transport import build_ssh_argv, connect, from_command
 
@@ -43,6 +44,7 @@ __all__ = [
     "SFTPNoSuchFileError",
     "SFTPPermissionError",
     "SFTPConnectionError",
+    "SFTPTimeoutError",
     "AtomicUploadItem",
     "PipelinedWriter",
     "ProgressCallback",

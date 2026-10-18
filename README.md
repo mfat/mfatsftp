@@ -125,9 +125,9 @@ buf = io.BytesIO()
 sftp.getfo("/tmp/hello.txt", buf)
 ```
 
-`open()` returns a binary file object with `read`, `write`, `seek`, `tell`,
-`truncate`, `stat` and `chmod`. Modes follow Python's `open()` (`r`, `r+`, `w`,
-`w+`, `a`, `a+`, `x`, `x+`):
+`open()` returns a binary file object with `read`, `readline`, line iteration,
+`write`, `writelines`, `seek`, `tell`, `truncate`, `stat` and `chmod`. Modes
+follow Python's `open()` (`r`, `r+`, `w`, `w+`, `a`, `a+`, `x`, `x+`):
 
 ```python
 with sftp.open("/etc/os-release") as f:
@@ -138,7 +138,19 @@ with sftp.open("/srv/app/.env", "w", create_mode=0o600) as f:   # private from t
 
 with sftp.open("/var/log/app.log", "a") as f:
     f.write(b"another line\n")
+
+with sftp.open("/var/log/syslog") as f:
+    for line in f:                 # one round trip per ~255 KiB, not per line
+        ...
+
+with sftp.open("/tmp/export.csv", "w", bufsize=65536) as f:   # buffer small writes
+    for row in rows:
+        f.write(row)
 ```
+
+By default each `write()` waits for the server to confirm it, which costs a
+round trip per call. When you write many small pieces, open with a `bufsize`
+or call `f.set_pipelined()`. Errors then surface at `flush()` or `close()`.
 
 ### Safe replacement
 
@@ -158,6 +170,8 @@ sftp.atomic_rename("/srv/app/config.tmp", "/srv/app/config")
 ```python
 sftp.listdir("/srv")                    # names
 sftp.listdir_attr("/srv")               # SFTPAttributes, with .filename
+for attr in sftp.listdir_iter("/huge"): # streams entries as they arrive
+    ...
 for top, dirs, files in sftp.walk("/srv"):   # like os.walk
     ...
 sftp.mkdir("/srv/new", 0o755)
@@ -219,6 +233,18 @@ SFTP filenames are raw bytes. mfatsftp decodes them as UTF-8 with
 that isn't valid UTF-8 therefore still works when passed back to `stat`,
 `open`, `remove`, and so on, and `os.fsencode(name)` gives its original bytes.
 
+### Timeouts
+
+By default a request waits as long as it takes; OpenSSH's own
+`ServerAliveInterval` option detects a dead connection. To bound each reply:
+
+```python
+sftp.settimeout(30)        # raises mfatsftp.SFTPTimeoutError (a TimeoutError)
+```
+
+After a timeout, the request may still have happened on the server, so the
+safe way to recover is to close the client and reconnect.
+
 ### Threads
 
 A client may be shared between threads, and concurrent calls are pipelined
@@ -261,6 +287,9 @@ is mostly round trips. mfatsftp hides as many of them as it can:
 - **Server-sized chunks.** Chunk sizes come from `limits@openssh.com` (about
   255 KiB on OpenSSH, instead of a fixed 32 KiB). When a server sends back
   less than it advertised, the rest is fetched in one batch.
+- **Configurable.** Set `sftp.max_concurrent_requests` (or pass
+  `max_concurrent_prefetch_requests=` to `get`) to cap the requests in
+  flight for a server that misbehaves with many.
 - **Batched metadata.** `stat_many`, `listdir_many`, `mkdir_many`,
   `remove_many`, `rmdir_many`, `read_small_files` and `atomic_upload_many`
   send up to 100 requests at a time. `get_dir`, `put_dir` and `rmtree` are
@@ -273,22 +302,36 @@ instead of about 500. The test suite checks numbers like these.
 
 ## Coming from paramiko
 
-The everyday `SFTPClient` methods have the same names and arguments: `open`/
-`file`, `stat`/`lstat`, `listdir`/`listdir_attr`, `mkdir`/`rmdir`,
-`remove`/`unlink`, `rename`/`posix_rename`, `chmod`/`chown`/`utime`/`truncate`,
-`symlink`/`readlink`, `normalize`, `get`/`put`/`getfo`/`putfo`. The
-attributes object has the same `st_*` fields.
+All of paramiko's file-operation methods exist here with the same names and
+arguments: `open`/`file`
+(including `bufsize`), `stat`/`lstat`, `listdir`/`listdir_attr`/
+`listdir_iter`, `mkdir`/`rmdir`, `remove`/`unlink`, `rename`/`posix_rename`,
+`chmod`/`chown`/`utime`/`truncate`, `symlink`/`readlink`, `normalize`,
+`chdir`/`getcwd`, and `get`/`put`/`getfo`/`putfo` (including `prefetch` and
+`max_concurrent_prefetch_requests`). `SFTPFile` matches too: line reading and
+iteration, `readv`, `set_pipelined`, `prefetch`, `settimeout`, `chmod`/
+`chown`/`utime`/`truncate`/`stat`. `SFTPAttributes` has the same `st_*`
+fields, `attr` and `from_stat`.
 
 Differences:
 
-- You connect with `mfatsftp.connect(host)` instead of building a `Transport`.
-- `get`/`put`/`getfo`/`putfo` return the number of bytes transferred.
-  `putfo`'s `confirm` check is off by default; pass `confirm=True` to verify
-  the remote size afterwards.
-- There's no `chdir`/`getcwd`. Relative paths are relative to the login
-  directory; use `realpath(".")` to find it.
-- Files are unbuffered binary objects. For text lines, wrap one:
-  `io.TextIOWrapper(io.BufferedReader(f), encoding="utf-8")`.
+- You connect with `mfatsftp.connect(host)` instead of building a `Transport`,
+  and there's no `from_transport`/`get_channel`. Each client runs its own
+  `ssh`; OpenSSH's `ControlMaster`/`ControlPersist` options let several share
+  one login.
+- `put`/`putfo` default to `confirm=False`; pass `confirm=True` to check the
+  remote size afterwards. `get`/`put`/`getfo`/`putfo` return the number of
+  bytes transferred.
+- Unset attribute fields: paramiko uses `None` for `st_size`/`st_mode`,
+  mfatsftp uses `0`.
+- `SFTPFile.check()` (the `check-file` hash extension) isn't implemented;
+  OpenSSH doesn't support it.
+- At EOF, the low-level `SFTPClient.read(handle, …)` returns `b""` rather
+  than raising `EOFError` (`SFTPFile` behaves the same in both).
+- Errors are `SFTPError` subclasses that are also `FileNotFoundError`,
+  `PermissionError`, `ConnectionError` or `TimeoutError`, so existing
+  `except IOError` / `except OSError` handlers still catch them.
+- No SFTP server implementation.
 
 ## Development
 

@@ -88,6 +88,9 @@ once and the client may be shared between threads.
 | `extensions` | `dict[str, bytes]` of extensions the server advertised. |
 | `max_read_length`, `max_write_length` | Transfer chunk sizes (from `limits@openssh.com`, else 32 KiB). |
 | `max_open_handles` | Server's open-handle limit, 0 if unknown. |
+| `max_concurrent_requests` | Optional cap on requests kept in flight by transfers and batch operations. `None` (default) means adaptive. Set it, e.g. to 64, for servers that stall with many outstanding requests. A server that sends back short reads can briefly see up to twice the cap. |
+| `settimeout(seconds)`, `gettimeout()`, `timeout` | Wait at most this long for each reply. `None` (default) waits forever. A late reply raises `SFTPTimeoutError` (a `TimeoutError`) and is discarded when it arrives. The server may still have carried the request out, so closing the client is the safe way to recover. |
+| `chdir(path=None)`, `getcwd()` | Emulated working directory, as in paramiko: relative paths passed to this client are joined onto it. `chdir(None)` clears it. A non-directory raises `NotADirectoryError`. |
 
 ### Paths and metadata
 
@@ -111,6 +114,7 @@ once and the client may be shared between threads.
 |---|---|
 | `listdir(path=".") -> list[str]` | Entry names (`.`/`..` omitted). |
 | `listdir_attr(path=".") -> list[SFTPAttributes]` | Entries with `filename` set. Attributes describe the entry itself, so symlinks show as symlinks. |
+| `listdir_iter(path=".", read_aheads=8)` | Generator yielding the same entries as they arrive, with `read_aheads` READDIRs in flight. The directory is opened on the first `next()`; stopping early closes it. |
 | `walk(top)` | Generator of `(dirpath, dirnames, filenames)`, top-down, like `os.walk`. Symlinks to directories appear in `filenames` and are not followed. Removing items from `dirnames` prunes the walk. |
 | `mkdir(path, mode=None)` | Create a directory (`mode` is subject to the server's umask). |
 | `makedirs(path, mode=None)` | Create with missing parents, like `mkdir -p`. Existing directories are fine; a non-directory in the way raises `SFTPError`. |
@@ -145,9 +149,20 @@ Also available as `file(...)`. Modes follow Python's `open()`:
 | `x+` | ✓ | ✓ | ✓ | | as `x` |
 
 `b` and `t` are accepted and ignored: data is always bytes. Any other mode
-raises `ValueError`. `bufsize` is ignored (kept for paramiko compatibility).
-`create_mode` sets a new file's permissions in the same request (the server's
-umask still applies).
+raises `ValueError`. `create_mode` sets a new file's permissions in the same
+request (the server's umask still applies).
+
+`bufsize` controls write buffering, as in paramiko:
+
+| `bufsize` | Writes |
+|---|---|
+| `-1` (default), `0` | each `write()` is sent at once and confirmed before it returns |
+| `1` | buffered until a newline is written |
+| `> 1` | buffered up to that many bytes |
+
+Buffered data goes out on `flush()`, on any read, seek, stat or metadata
+call, and on `close()`. Reads are always buffered internally for
+`readline`.
 
 ### Transfers
 
@@ -157,8 +172,8 @@ transferred.
 
 | Method | Description |
 |---|---|
-| `get(remotepath, localpath, callback=None)` | Download to a local file (created or truncated). |
-| `getfo(remotepath, fl, callback=None)` | Download into a binary file object. |
+| `get(remotepath, localpath, callback=None, prefetch=True, max_concurrent_prefetch_requests=None)` | Download to a local file (created or truncated). `max_concurrent_prefetch_requests` caps the reads in flight. `prefetch` is ignored, because reads are always pipelined; it is accepted for paramiko compatibility. |
+| `getfo(remotepath, fl, callback=None, prefetch=True, max_concurrent_prefetch_requests=None)` | Download into a binary file object. |
 | `put(localpath, remotepath, callback=None, confirm=False)` | Upload a local file (remote file created or truncated). |
 | `putfo(fl, remotepath, file_size=0, callback=None, confirm=False)` | Upload from a binary file object. `file_size` is the callback's total (taken from `fl` if it is a real file). `confirm=True` checks the remote size afterwards and raises `OSError` on a mismatch. |
 | `get_dir(remotepath, localpath, callback=None)` | Recursive download into `localpath` (created if needed). Symlinks to files are downloaded as files. Symlinks to directories and dangling symlinks are skipped. Names containing `/` (or `\` and `:` on Windows), or equal to `.`/`..`, raise `SFTPError`. |
@@ -201,7 +216,8 @@ For building your own operations. Handles are `bytes`.
 | `fstat(handle) -> SFTPAttributes` | Attributes of an open handle. |
 | `fsetstat(handle, attr)` | As `setstat`, on a handle. |
 | `read(handle, offset, length) -> bytes` | One READ. `b""` at EOF; may return fewer bytes than asked before EOF. |
-| `iter_read(handle, offset=0, length=None)` | Generator of chunks from `offset` up to `length` or EOF, pipelined. |
+| `iter_read(handle, offset=0, length=None, *, max_concurrent_requests=None)` | Generator of chunks from `offset` up to `length` or EOF, pipelined. |
+| `readv(handle, chunks, *, max_concurrent_requests=None) -> list[bytes]` | Read many `(offset, length)` ranges at once, in order. A range past EOF comes back short. |
 | `write(handle, offset, data)` | One WRITE; `data` must fit in `max_write_length`. |
 | `pipelined_writer(handle, offset=0, *, on_ack=None) -> PipelinedWriter` | Streaming writer; see below. |
 
@@ -209,25 +225,36 @@ For building your own operations. Handles are `bytes`.
 
 ## `SFTPFile`
 
-Returned by `SFTPClient.open`. A binary, unbuffered file object. Reads and
-writes larger than one chunk are pipelined.
+Returned by `SFTPClient.open`. A binary file object. Reads and writes larger
+than one chunk are pipelined.
 
 | Member | Description |
 |---|---|
 | `read(size=None) -> bytes` | Up to `size` bytes, or to EOF when `size` is `None` or negative. `b""` at EOF. |
-| `readinto(buffer) -> int` | Read into a writable buffer. Lets `io.BufferedReader` wrap the file: `io.TextIOWrapper(io.BufferedReader(f), encoding="utf-8")`. |
-| `write(data) -> int` | Write at the current position. Returns once the server has confirmed it. |
+| `readline(size=None) -> bytes` | One line including `b"\n"` (at most `size` bytes). `b""` at EOF. Data is fetched a server-sized chunk at a time, so reading line by line costs one round trip per chunk, not per line. |
+| `readlines(sizehint=None)`, `for line in f` | All lines, or iterate over them. |
+| `readinto(buffer) -> int` | Read into a writable buffer. This lets `io.TextIOWrapper(io.BufferedReader(f), encoding="utf-8")` wrap the file for decoded text. |
+| `readv(chunks, max_concurrent_prefetch_requests=None) -> list[bytes]` | Read many `(offset, length)` ranges at once. The position is unchanged. |
+| `write(data) -> int` | Write at the current position. Unless buffered or pipelined, returns once the server has confirmed it. |
+| `writelines(lines)` | `write` each item. |
+| `flush()` | Send buffered writes and wait for confirmation. Raises the first write error. |
+| `set_pipelined(pipelined=True)` | Don't wait for each write to be confirmed. Errors then surface from the next read, seek, stat, `flush` or `close`. |
 | `seek(offset, whence=os.SEEK_SET) -> int` | `SEEK_SET`, `SEEK_CUR` or `SEEK_END`. |
 | `tell() -> int` | Current position. |
 | `truncate(size=None) -> int` | Resize (default: to the current position). The position does not move. |
 | `stat() -> SFTPAttributes` | Attributes of the open file. |
-| `chmod(mode)`, `utime(times=None)` | As on the client, for this file. |
-| `flush()` | No-op (writes are already confirmed). |
+| `chmod(mode)`, `chown(uid, gid)`, `utime(times=None)` | As on the client, for this file. |
+| `settimeout(t)`, `gettimeout()`, `setblocking(flag)` | Set the timeout of the whole client, as in paramiko. `setblocking(False)` is a timeout of 0. |
+| `prefetch(file_size=None, max_concurrent_requests=None)` | No-op kept for paramiko compatibility; reads are always pipelined. |
 | `readable()`, `writable()`, `seekable()` | From the mode. |
-| `close()`, `closed` | Close the handle (idempotent). Using a closed file raises `ValueError`. |
+| `close()`, `closed` | Send buffered writes and close the handle (idempotent). A write error is raised after the handle is closed. Using a closed file raises `ValueError`. |
 | `handle` | The raw handle, e.g. for `copy_data`. |
 | `mode` | The mode string passed to `open`. |
 | `with f:` | Closes on exit. |
+
+A file that is garbage-collected without being closed sends its buffered
+writes and closes its handle without waiting for replies, so errors at that
+point go unnoticed. Close files explicitly.
 
 ---
 
@@ -243,9 +270,11 @@ A dataclass returned by `stat`, `lstat`, `fstat` and the listing methods.
 | `st_atime`, `st_mtime` | `int \| None` | epoch seconds |
 | `filename` | `str \| None` | set for listing entries |
 | `longname` | `str \| None` | the server's `ls -l` style line, for listing entries |
+| `attr` | `dict[str, bytes]` | extended attributes the server sent (sent back by `setstat` when non-empty) |
 
-Methods: `is_file()`, `is_dir()`, `is_symlink()`. `str(attr)` gives an
-`ls -l`-like line.
+Methods: `is_file()`, `is_dir()`, `is_symlink()`, and the class method
+`SFTPAttributes.from_stat(os_stat_result, filename=None)`. `str(attr)` gives
+an `ls -l`-like line.
 
 To set attributes, build one with only the fields you want to change and pass
 it to `setstat`/`fsetstat`.
@@ -303,6 +332,7 @@ an `SFTPError` picks the subclass that matches the code:
 | `SFTPNoSuchFileError` | `FileNotFoundError` | `FX_NO_SUCH_FILE` |
 | `SFTPPermissionError` | `PermissionError` | `FX_PERMISSION_DENIED` |
 | `SFTPConnectionError` | `ConnectionError` | `FX_NO_CONNECTION`, `FX_CONNECTION_LOST`, and any request after the session closed |
+| `SFTPTimeoutError` | `TimeoutError` | no reply within the client's `settimeout` (`.code` is `FX_FAILURE`, `.errno` is `ETIMEDOUT`) |
 | `SFTPError` | `OSError` | everything else (`FX_FAILURE`, `FX_OP_UNSUPPORTED`, …) |
 
 `connect`/`from_command` raise `PermissionError`, `TimeoutError` or `OSError`
