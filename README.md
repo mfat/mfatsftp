@@ -1,5 +1,10 @@
 # mfatsftp
 
+[![PyPI](https://img.shields.io/pypi/v/mfatsftp)](https://pypi.org/project/mfatsftp/)
+[![Python versions](https://img.shields.io/pypi/pyversions/mfatsftp)](https://pypi.org/project/mfatsftp/)
+[![License](https://img.shields.io/pypi/l/mfatsftp)](https://github.com/mfat/mfatsftp/blob/main/LICENSE)
+[![CI](https://github.com/mfat/mfatsftp/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/mfat/mfatsftp/actions/workflows/ci.yml)
+
 **A pure-Python SFTP client that works through your system's OpenSSH.**
 
 `mfatsftp` implements the SFTP application protocol (v3, the version OpenSSH
@@ -50,6 +55,8 @@ with mfatsftp.connect("user@host") as sftp:
   [below](#server-extensions).
 
 ## Installation
+
+From [PyPI](https://pypi.org/project/mfatsftp/):
 
 ```sh
 pip install mfatsftp
