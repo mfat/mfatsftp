@@ -73,10 +73,10 @@ MFATSFTP_TEST_HOST=localhost pytest tests/test_live_ssh.py
 2. Commit, push, and wait for CI to pass.
 3. Tag and push: `git tag -a vX.Y.Z -m "mfatsftp X.Y.Z" && git push origin vX.Y.Z`.
 
-The release workflow then builds the package and creates the GitHub release,
-with notes taken from the changelog. Publishing to PyPI is a separate step that
-only runs when the repository variable `PYPI_PUBLISH` is `true`; it is off
-while PyPI publishing is still planned.
+The release workflow then builds the package, creates the GitHub release with
+notes taken from the changelog, and publishes to PyPI (a separate job that runs
+while the repository variable `PYPI_PUBLISH` is `true`). To rerun it for an
+existing tag: `gh workflow run release.yml -f tag=vX.Y.Z`.
 
 ## Reporting bugs
 

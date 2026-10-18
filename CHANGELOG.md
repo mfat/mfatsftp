@@ -38,8 +38,8 @@ a security fix.
   docstrings), ready for Read the Docs; `CONTRIBUTING.md` and `SECURITY.md`.
 - Tests that fail when a public member lacks a docstring or an entry in
   `docs/api.md`, or when a code sample in the docs does not compile.
-- A release workflow for publishing to PyPI from a `v*` tag (PyPI publishing
-  is planned; 0.3.0 is not on PyPI).
+- A release workflow that builds a `v*` tag, creates the GitHub release and
+  publishes to PyPI.
 
 ### Changed
 - Type hints pass `mypy --strict`; CI checks them, along with the docs build.

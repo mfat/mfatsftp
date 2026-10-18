@@ -51,15 +51,12 @@ with mfatsftp.connect("user@host") as sftp:
 
 ## Installation
 
-mfatsftp is not on PyPI yet; a PyPI release is planned. Install it from
-GitHub:
-
 ```sh
-pip install git+https://github.com/mfat/mfatsftp            # latest
-pip install git+https://github.com/mfat/mfatsftp@v0.3.0     # this release
+pip install mfatsftp
 ```
 
-Or from a checkout: `pip install .`
+The latest development version: `pip install git+https://github.com/mfat/mfatsftp`
+(or `pip install .` from a checkout).
 
 ## Connecting
 

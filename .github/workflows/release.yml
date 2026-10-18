@@ -63,6 +63,8 @@ jobs:
           name: dist
           path: dist/
       - name: Release notes from CHANGELOG.md
+        env:
+          PYPI_PUBLISH: ${{ vars.PYPI_PUBLISH }}
         run: |
           python - <<'EOF'
           import os, pathlib, re
@@ -72,10 +74,13 @@ jobs:
           if not match:
               raise SystemExit(f"CHANGELOG.md has no section for {version}")
           notes = match.group(1).strip()
+          if os.environ.get("PYPI_PUBLISH") == "true":
+              install = f"pip install mfatsftp=={version}"
+          else:
+              install = f"pip install git+https://github.com/{os.environ['GITHUB_REPOSITORY']}@v{version}"
           notes += (
-              "\n\n### Install\n\n```sh\n"
-              f"pip install git+https://github.com/{os.environ['GITHUB_REPOSITORY']}@v{version}\n"
-              "```\n\nor install the wheel attached below.\n"
+              f"\n\n### Install\n\n```sh\n{install}\n```\n\n"
+              "or install the wheel attached below.\n"
           )
           pathlib.Path("notes.md").write_text(notes, encoding="utf-8")
           EOF
