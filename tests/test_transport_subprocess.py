@@ -7,6 +7,9 @@ the stderr drain, the handshake, and the clean teardown in ``close()``.
 
 import os
 import sys
+import time
+
+import pytest
 
 from mfatsftp import from_command
 
@@ -31,3 +34,31 @@ def test_from_command_subprocess_roundtrip(tmp_path):
 
     # The owned subprocess is reaped by close().
     assert client._proc.poll() is not None
+
+
+def test_handshake_timeout_stops_a_silent_command():
+    argv = [sys.executable, "-c", "import time; time.sleep(30)"]
+    started = time.monotonic()
+    with pytest.raises(TimeoutError):
+        from_command(argv, timeout=0.5)
+    assert time.monotonic() - started < 10
+
+
+def test_auth_failure_becomes_permission_error():
+    argv = [
+        sys.executable,
+        "-c",
+        "import sys; sys.stderr.write('user@host: Permission denied (publickey).\\n')",
+    ]
+    with pytest.raises(PermissionError, match="Permission denied"):
+        from_command(argv)
+
+
+def test_other_ssh_failure_carries_its_message():
+    argv = [
+        sys.executable,
+        "-c",
+        "import sys; sys.stderr.write('ssh: Could not resolve hostname nope\\n'); sys.exit(255)",
+    ]
+    with pytest.raises(OSError, match="Could not resolve hostname"):
+        from_command(argv)

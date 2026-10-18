@@ -1,40 +1,61 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
 name = "mfatsftp"
-version = "0.1.0"
-description = "Pure-Python SFTP that speaks through your system OpenSSH (no crypto to maintain)."
+version = "0.2.0"
+description = "Pure-Python SFTP client that speaks through your system OpenSSH (no crypto to maintain)."
 readme = "README.md"
 requires-python = ">=3.9"
-license = { text = "GPL-3.0-or-later" }
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
 authors = [{ name = "Mehdi" }]
 keywords = ["sftp", "ssh", "openssh", "file-transfer", "paramiko-alternative"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
     "Operating System :: POSIX",
     "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
-    "Topic :: Internet",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Internet :: File Transfer Protocol (FTP)",
     "Topic :: System :: Networking",
     "Typing :: Typed",
 ]
 dependencies = []  # stdlib only — the only external requirement is the `ssh` binary
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0"]
+dev = ["pytest>=7.0", "ruff"]
 
 [project.urls]
 Homepage = "https://github.com/mfat/mfatsftp"
 Source = "https://github.com/mfat/mfatsftp"
 Issues = "https://github.com/mfat/mfatsftp/issues"
+Changelog = "https://github.com/mfat/mfatsftp/blob/main/CHANGELOG.md"
 
+# Core metadata 2.4 (license expressions); twine and older tooling reject 2.5.
 [tool.hatch.build.targets.wheel]
 packages = ["src/mfatsftp"]
+core-metadata-version = "2.4"
+
+[tool.hatch.build.targets.sdist]
+core-metadata-version = "2.4"
+include = ["src", "tests", "examples", "docs", "README.md", "CHANGELOG.md", "LICENSE"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["src", "."]
+
+[tool.ruff]
+line-length = 110
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B"]

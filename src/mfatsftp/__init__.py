@@ -11,14 +11,24 @@ port forwarding, no server side).
 Quickstart::
 
     import mfatsftp
+
     with mfatsftp.connect("user@host") as sftp:
         for attr in sftp.listdir_attr("."):
             print(attr.filename, attr.st_size)
         sftp.get("/etc/hostname", "hostname.txt")
+
+See the README for the full guide and API reference.
 """
 
-from .client import SFTPClient, SFTPFile
-from .protocol import SFTPAttributes, SFTPError
+from .client import AtomicUploadItem, PipelinedWriter, ProgressCallback, SFTPClient, SFTPFile
+from .protocol import (
+    SFTPAttributes,
+    SFTPConnectionError,
+    SFTPError,
+    SFTPNoSuchFileError,
+    SFTPPermissionError,
+    SFTPStatVFS,
+)
 from .transport import build_ssh_argv, connect, from_command
 
 __all__ = [
@@ -28,7 +38,15 @@ __all__ = [
     "SFTPClient",
     "SFTPFile",
     "SFTPAttributes",
+    "SFTPStatVFS",
     "SFTPError",
+    "SFTPNoSuchFileError",
+    "SFTPPermissionError",
+    "SFTPConnectionError",
+    "AtomicUploadItem",
+    "PipelinedWriter",
+    "ProgressCallback",
+    "__version__",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

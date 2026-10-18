@@ -1,7 +1,8 @@
 """Transport: launch the system OpenSSH as an SFTP subsystem and wrap the pipes.
 
 ``connect()`` builds an ``ssh … -s <host> sftp`` command, spawns it, runs the
-SFTP handshake, and returns a connected :class:`~mfatsftp.client.SFTPClient`.
+SFTP handshake, and returns a connected :class:`~mfatsftp.client.SFTPClient`
+that owns the subprocess (closing the client stops it).
 
 **This library requires the ``ssh`` binary at runtime.** All transport, crypto,
 host-key checking, ``~/.ssh/config`` resolution, ProxyJump, agent, askpass and
@@ -40,8 +41,21 @@ def build_ssh_argv(
 
     Per-host details you don't pass here are resolved by ssh from
     ``~/.ssh/config`` — that file is the source of truth, exactly as on the
-    command line. *ssh_options* are passed verbatim as ``-o`` entries
-    (e.g. ``"StrictHostKeyChecking=accept-new"``).
+    command line.
+
+    :param host: ``"user@hostname"``, ``"hostname"`` or a ``~/.ssh/config``
+        alias.
+    :param port: ``-p``.
+    :param identity: private key file, ``-i`` (``~`` is expanded).
+    :param config: ssh config file, ``-F`` (``~`` is expanded).
+    :param proxy_jump: jump host(s), ``-J``.
+    :param known_hosts: ``-o UserKnownHostsFile=…`` (``~`` is expanded).
+    :param ssh_options: passed verbatim as ``-o`` entries, e.g.
+        ``["StrictHostKeyChecking=accept-new", "ConnectTimeout=10"]``.
+    :param batch_mode: ``-o BatchMode=yes``: never prompt, fail instead
+        (recommended for unattended scripts).
+    :param ssh_path: the ssh executable.
+    :param extra_args: extra arguments inserted before ``-s`` (e.g. ``["-v"]``).
     """
     argv: List[str] = [ssh_path]
     if config:
@@ -123,11 +137,23 @@ def from_command(
     argv: Sequence[str],
     *,
     env: Optional[dict] = None,
-    timeout: float = 30.0,
+    timeout: Optional[float] = None,
 ) -> SFTPClient:
     """Spawn *argv* (which must speak the SFTP subsystem on stdin/stdout) and
     return a connected client. Use this when you need full control of the ssh
-    command (custom flags, an ``sshpass`` wrapper for password auth, etc.)."""
+    command (custom flags, an ``sshpass`` wrapper for password auth, etc.).
+
+    :param env: extra environment variables, merged over ``os.environ``.
+    :param timeout: seconds allowed for login plus the SFTP handshake; the
+        process is stopped and :class:`TimeoutError` raised if it takes longer.
+        ``None`` (the default) waits indefinitely, which suits interactive
+        passphrase prompts. For network timeouts prefer ssh's own
+        ``ConnectTimeout`` option.
+    :raises PermissionError: authentication failed.
+    :raises TimeoutError: *timeout* expired.
+    :raises OSError: ssh failed for another reason (the message carries
+        ssh's error output), or *argv* could not be started.
+    """
     argv = list(argv)
     logger.debug("mfatsftp launching: %s", " ".join(argv))
     proc = subprocess.Popen(
@@ -157,16 +183,39 @@ def from_command(
     stderr_thread.start()
 
     client = _ProcessSFTPClient(proc, stderr_lines)
+    timed_out = threading.Event()
+    timer = None
+    if timeout is not None:
+
+        def _expire() -> None:
+            timed_out.set()
+            _terminate_proc(proc)
+
+        timer = threading.Timer(timeout, _expire)
+        timer.daemon = True
+        timer.start()
     try:
         client.start()
     except Exception as exc:
-        # Handshake never completed — auth failed or no sftp subsystem on host.
+        # Handshake never completed — auth failed, no sftp subsystem on the
+        # host, or the timeout stopped it.
         try:
-            proc.wait(timeout=timeout)
+            proc.wait(timeout=5)
         except Exception:  # pragma: no cover - defensive
             proc.kill()
         stderr_thread.join(timeout=0.5)
-        raise _classify_handshake_failure("\n".join(stderr_lines), exc)
+        client.close()
+        if timed_out.is_set():
+            raise TimeoutError(
+                f"SFTP connection not established within {timeout} seconds"
+            ) from exc
+        error = _classify_handshake_failure("\n".join(stderr_lines), exc)
+        if error is exc:
+            raise
+        raise error from exc
+    finally:
+        if timer is not None:
+            timer.cancel()
     return client
 
 
@@ -183,14 +232,21 @@ def connect(
     ssh_path: str = "ssh",
     extra_args: Optional[Sequence[str]] = None,
     env: Optional[dict] = None,
-    timeout: float = 30.0,
+    timeout: Optional[float] = None,
 ) -> SFTPClient:
     """Connect to *host* over SFTP via the system OpenSSH.
 
     *host* may be ``"user@hostname"`` or a ``~/.ssh/config`` alias. See
-    :func:`build_ssh_argv` for the option semantics. Auth is delegated to ssh
-    (agent / askpass / config); for password auth, wrap your own command and use
-    :func:`from_command`.
+    :func:`build_ssh_argv` for the connection options and :func:`from_command`
+    for *env*, *timeout* and the exceptions raised. Auth is delegated to ssh
+    (agent / askpass / config); for password auth, wrap your own command and
+    use :func:`from_command`.
+
+    Use the returned client as a context manager so the ssh process is
+    always stopped::
+
+        with mfatsftp.connect("backup@nas", batch_mode=True) as sftp:
+            sftp.put_dir("site/", "/var/www/site")
     """
     argv = build_ssh_argv(
         host,

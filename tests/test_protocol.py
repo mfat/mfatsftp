@@ -90,3 +90,56 @@ def test_sftp_error_sets_errno():
     err = p.SFTPError(p.FX_NO_SUCH_FILE)
     assert err.errno == errno.ENOENT
     assert p.SFTPError(p.FX_PERMISSION_DENIED).errno == errno.EACCES
+
+
+def test_sftp_error_subclasses_match_builtin_exceptions():
+    import errno
+    import pickle
+
+    missing = p.SFTPError(p.FX_NO_SUCH_FILE, "gone")
+    assert isinstance(missing, FileNotFoundError)
+    assert isinstance(missing, p.SFTPNoSuchFileError)
+    assert str(missing) == "gone"
+    assert isinstance(p.SFTPError(p.FX_PERMISSION_DENIED), PermissionError)
+    lost = p.SFTPError(p.FX_CONNECTION_LOST)
+    assert isinstance(lost, ConnectionError) and lost.errno == errno.EPIPE
+    generic = p.SFTPError(p.FX_FAILURE)
+    assert type(generic) is p.SFTPError
+    assert str(generic) == "Failure" and generic.errno == errno.EIO
+    assert p.SFTPError(p.FX_OP_UNSUPPORTED).errno == errno.EOPNOTSUPP
+    copy = pickle.loads(pickle.dumps(missing))
+    assert type(copy) is p.SFTPNoSuchFileError
+    assert (copy.code, str(copy)) == (p.FX_NO_SUCH_FILE, "gone")
+
+
+def test_non_utf8_names_round_trip():
+    raw = b"caf\xe9"
+    name = p._Reader(p.pack_string(raw)).text()
+    assert name == "caf\udce9"
+    assert p.pack_string(name) == p.pack_string(raw)
+
+
+def test_parse_statvfs():
+    values = list(range(1, 12))
+    payload = p.pack_uint32(1) + b"".join(p.pack_uint64(v) for v in values)
+    vfs = p.parse_statvfs(payload)
+    assert vfs.f_bsize == 1 and vfs.f_namemax == 11
+    assert list(vfs) == values
+
+
+def test_id_names_round_trip():
+    names = p.pack_string(p.pack_string("root") + p.pack_string(""))
+    groups = p.pack_string(p.pack_string("wheel") + p.pack_string("staff"))
+    users, grps = p.parse_id_names(p.pack_uint32(1) + names + groups)
+    assert users == ["root", ""]
+    assert grps == ["wheel", "staff"]
+    assert p.pack_id_list([0, 1]) == p.pack_string(p.pack_uint32(0) + p.pack_uint32(1))
+
+
+def test_attributes_helpers_and_str():
+    f = p.SFTPAttributes(st_mode=0o100644, st_size=12, filename="a.txt")
+    assert f.is_file() and not f.is_dir() and not f.is_symlink()
+    assert str(f) == "-rw-r--r--         12 a.txt"
+    link = p.SFTPAttributes(st_mode=0o120777, longname="lrwxrwxrwx 1 u g 4 x -> y")
+    assert link.is_symlink() and not link.is_file()
+    assert str(link) == link.longname

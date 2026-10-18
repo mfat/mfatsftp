@@ -1,19 +1,26 @@
 """Pure-Python SFTP v3 wire-protocol codec (no I/O, no third-party deps).
 
-This implements just the SFTP protocol layer (RFC draft-ietf-secsh-filexfer-02,
-the version OpenSSH speaks as v3). It is transport-agnostic: callers feed/drain
-bytes (typically the stdin/stdout pipes of an ``ssh host -s sftp`` subprocess).
+This implements just the SFTP protocol layer (draft-ietf-secsh-filexfer-02,
+the version OpenSSH speaks as v3, plus the OpenSSH extensions described in
+OpenSSH's ``PROTOCOL`` file). It is transport-agnostic: callers feed/drain
+bytes (typically the stdin/stdout pipes of an ``ssh -s host sftp`` subprocess).
 
 Everything here is pure and unit-testable: packet build/parse and attribute
-encode/decode. The live client (subprocess + threads) lives in ``client.py`` /
-``transport.py``.
+encode/decode. The live client (threads, pipelining) lives in ``client.py``;
+the subprocess transport in ``transport.py``.
+
+Strings: SFTP v3 filenames are raw bytes. They are decoded as UTF-8 with
+``surrogateescape``, so a name that is not valid UTF-8 survives a round trip
+(the same convention as :func:`os.fsdecode` on POSIX).
 """
 
 from __future__ import annotations
 
 import dataclasses
+import errno as _errno
+import stat as _stat
 import struct
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
 PROTOCOL_VERSION = 3
 
@@ -89,34 +96,84 @@ S_IFDIR = 0o040000
 S_IFLNK = 0o120000
 
 
-class SFTPError(IOError):
-    """An SFTP STATUS response with a non-OK code.
+_FX_ERRNO = {
+    FX_NO_SUCH_FILE: _errno.ENOENT,
+    FX_PERMISSION_DENIED: _errno.EACCES,
+    FX_NO_CONNECTION: _errno.EPIPE,
+    FX_CONNECTION_LOST: _errno.EPIPE,
+    FX_OP_UNSUPPORTED: _errno.EOPNOTSUPP,
+}
 
-    Subclasses ``IOError`` and sets ``errno`` so existing helpers that inspect
-    ``exc.errno`` (e.g. for ENOENT) keep working.
+
+class SFTPError(IOError):
+    """An SFTP STATUS response with a non-OK code (or a lost session).
+
+    ``code`` is the SFTP status (``FX_*``) and ``errno`` the closest POSIX
+    errno. Constructing one picks a subclass that also inherits the matching
+    built-in exception, so ordinary Python handlers work::
+
+        try:
+            sftp.stat(path)
+        except FileNotFoundError:   # FX_NO_SUCH_FILE
+            ...
+        except PermissionError:     # FX_PERMISSION_DENIED
+            ...
+
+    Every such error is still an ``SFTPError`` (and an ``OSError``).
     """
 
-    def __init__(self, code: int, message: str = "") -> None:
-        self.code = code
-        text = message or _FX_NAMES.get(code, f"SFTP error {code}")
-        super().__init__(text)
-        import errno as _errno
+    code: int
+    message: str
 
-        if code == FX_NO_SUCH_FILE:
-            self.errno = _errno.ENOENT
-        elif code == FX_PERMISSION_DENIED:
-            self.errno = _errno.EACCES
-        elif code in (FX_NO_CONNECTION, FX_CONNECTION_LOST):
-            self.errno = _errno.EPIPE
-        else:
-            self.errno = _errno.EIO
+    def __new__(cls, code: int, message: str = "") -> "SFTPError":
+        target = _ERROR_CLASSES.get(code, cls) if cls is SFTPError else cls
+        return super().__new__(target, _status_text(code, message))
+
+    def __init__(self, code: int, message: str = "") -> None:
+        super().__init__(_status_text(code, message))
+        self.code = code
+        self.message = message
+        self.errno = _FX_ERRNO.get(code, _errno.EIO)
+
+    def __reduce__(self):
+        return (SFTPError, (self.code, self.message))
+
+
+def _status_text(code: int, message: str) -> str:
+    return message or _FX_NAMES.get(code, f"SFTP error {code}")
+
+
+class SFTPNoSuchFileError(SFTPError, FileNotFoundError):
+    """``FX_NO_SUCH_FILE``: the path does not exist."""
+
+
+class SFTPPermissionError(SFTPError, PermissionError):
+    """``FX_PERMISSION_DENIED``: the server refused access."""
+
+
+class SFTPConnectionError(SFTPError, ConnectionError):
+    """``FX_NO_CONNECTION`` / ``FX_CONNECTION_LOST``: the session is gone."""
+
+
+_ERROR_CLASSES = {
+    FX_NO_SUCH_FILE: SFTPNoSuchFileError,
+    FX_PERMISSION_DENIED: SFTPPermissionError,
+    FX_NO_CONNECTION: SFTPConnectionError,
+    FX_CONNECTION_LOST: SFTPConnectionError,
+}
 
 
 @dataclasses.dataclass
 class SFTPAttributes:
-    """Decoded file attributes. Field names mirror paramiko's SFTPAttributes
-    (``st_size``/``st_mode``/``st_mtime``/…) so paramiko-oriented helpers can be
-    reused unchanged."""
+    """Decoded file attributes, as returned by ``stat``/``listdir_attr``.
+
+    Field names mirror :func:`os.stat_result` and paramiko's
+    ``SFTPAttributes`` (``st_size``/``st_mode``/``st_mtime``/…), so the
+    :mod:`stat` helpers work on ``st_mode`` directly. Fields the server did not
+    send are ``None`` (``st_size``/``st_mode`` default to ``0``). Directory
+    entries also carry ``filename`` and the server's ``ls -l`` style
+    ``longname``.
+    """
 
     st_size: int = 0
     st_uid: Optional[int] = None
@@ -128,10 +185,21 @@ class SFTPAttributes:
     longname: Optional[str] = None
 
     def is_dir(self) -> bool:
+        """True for a directory (a symlink from ``lstat`` is not one)."""
         return (self.st_mode & S_IFMT) == S_IFDIR
 
+    def is_file(self) -> bool:
+        """True for a regular file."""
+        return _stat.S_ISREG(self.st_mode)
+
     def is_symlink(self) -> bool:
+        """True for a symlink (only ``lstat`` and listings report these)."""
         return (self.st_mode & S_IFMT) == S_IFLNK
+
+    def __str__(self) -> str:
+        return self.longname or (
+            f"{_stat.filemode(self.st_mode)} {self.st_size:>10} {self.filename or ''}"
+        ).rstrip()
 
 
 # -- low level field helpers ------------------------------------------------
@@ -147,7 +215,9 @@ def pack_uint64(value: int) -> bytes:
 
 def pack_string(value) -> bytes:
     if isinstance(value, str):
-        value = value.encode("utf-8")
+        # surrogateescape restores the raw bytes of a name that was not valid
+        # UTF-8 when the server sent it (see ``_Reader.text``).
+        value = value.encode("utf-8", "surrogateescape")
     return pack_uint32(len(value)) + value
 
 
@@ -175,7 +245,11 @@ class _Reader:
         return v
 
     def text(self) -> str:
-        return self.string().decode("utf-8", "replace")
+        # surrogateescape, not replace: a filename's bytes need not be valid
+        # UTF-8, and replacing them names a file that does not exist. The
+        # lone surrogates round-trip through ``pack_string`` and
+        # ``os.fsencode``.
+        return self.string().decode("utf-8", "surrogateescape")
 
     def remaining(self) -> int:
         return len(self._data) - self._pos
@@ -295,6 +369,58 @@ def parse_data(payload: bytes) -> Tuple[int, bytes]:
     reader = _Reader(payload)
     request_id = reader.uint32()
     return request_id, reader.string()
+
+
+class SFTPStatVFS(NamedTuple):
+    """A ``statvfs@openssh.com`` reply, shaped like :func:`os.statvfs`.
+
+    Block counts are in ``f_frsize`` units, so free space for unprivileged
+    users is ``f_bavail * f_frsize`` bytes.
+    """
+
+    f_bsize: int
+    f_frsize: int
+    f_blocks: int
+    f_bfree: int
+    f_bavail: int
+    f_files: int
+    f_ffree: int
+    f_favail: int
+    f_fsid: int
+    f_flag: int
+    f_namemax: int
+
+
+def parse_statvfs(payload: bytes) -> SFTPStatVFS:
+    """Parse a ``statvfs@openssh.com`` EXTENDED_REPLY payload."""
+    reader = _Reader(payload)
+    reader.uint32()  # request id
+    return SFTPStatVFS(*(reader.uint64() for _ in SFTPStatVFS._fields))
+
+
+def pack_id_list(ids: List[int]) -> bytes:
+    """A ``users-groups-by-id@openssh.com`` id list: uint32s inside one string."""
+    return pack_string(b"".join(pack_uint32(i) for i in ids))
+
+
+def _name_list(blob: bytes) -> List[str]:
+    reader = _Reader(blob)
+    names: List[str] = []
+    while reader._pos < len(blob):
+        names.append(reader.text())
+    return names
+
+
+def parse_id_names(payload: bytes) -> Tuple[List[str], List[str]]:
+    """Parse a ``users-groups-by-id@openssh.com`` EXTENDED_REPLY payload.
+
+    Names come back in request order; an id the server cannot name is ``""``.
+    """
+    reader = _Reader(payload)
+    reader.uint32()  # request id
+    users = _name_list(reader.string())
+    groups = _name_list(reader.string())
+    return users, groups
 
 
 def parse_attrs(payload: bytes) -> Tuple[int, SFTPAttributes]:
