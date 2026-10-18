@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-18
+
+paramiko parity for the SFTP client, a documentation site, strict typing, and
+a security fix.
+
 ### Added
 - Reply timeouts: `SFTPClient.settimeout()`/`gettimeout()` (also on
   `SFTPFile`, with `setblocking`), raising the new `SFTPTimeoutError`
@@ -23,6 +28,26 @@ All notable changes to this project are documented here. The format is based on
   previously discarded) and `SFTPAttributes.from_stat()`.
 - A garbage-collected `SFTPFile` sends its buffered writes and closes its
   handle without waiting for replies.
+- Documentation site (Sphinx, with a reference generated from the
+  docstrings), ready for Read the Docs; `CONTRIBUTING.md` and `SECURITY.md`.
+- Tests that fail when a public member lacks a docstring or an entry in
+  `docs/api.md`, or when a code sample in the docs does not compile.
+- A release workflow that publishes to PyPI when a `v*` tag is pushed.
+
+### Changed
+- Type hints pass `mypy --strict`; CI checks them, along with the docs build.
+  Stream arguments are typed `IO[bytes]` and `env` as `Dict[str, str]`.
+
+### Fixed
+- `put_dir` now gives small files exactly their local permission bits. The
+  server's umask could strip bits from them before, for example group write.
+- The docs gave OpenSSH 9.6 as the first version with
+  `users-groups-by-id@openssh.com`; it is 9.1.
+
+### Security
+- `connect()` / `build_ssh_argv()` refuse a host that is empty or starts with
+  `-`. Before, a host such as `-oProxyCommand=…` from untrusted input was read
+  by ssh as an option and could run a local command.
 
 ## [0.2.0] - 2026-10-18
 
@@ -107,6 +132,7 @@ convenience API a standalone library needs, and documents all of it.
   OpenSSH (`ssh -s <host> sftp`), with clean subprocess teardown.
 - In-memory SFTP server test fixture; protocol, client and transport test suites.
 
-[Unreleased]: https://github.com/mfat/mfatsftp/compare/v0.2.0...HEAD
-[0.2.0]: https://github.com/mfat/mfatsftp/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/mfat/mfatsftp/releases/tag/v0.1.0
+[Unreleased]: https://github.com/mfat/mfatsftp/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/mfat/mfatsftp/releases/tag/v0.3.0
+[0.2.0]: https://github.com/mfat/mfatsftp/commit/09978e8
+[0.1.0]: https://github.com/mfat/mfatsftp/commit/aa26356

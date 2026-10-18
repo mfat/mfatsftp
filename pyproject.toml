@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mfatsftp"
-version = "0.2.0"
+version = "0.3.0"
 description = "Pure-Python SFTP client that speaks through your system OpenSSH (no crypto to maintain)."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -32,7 +32,8 @@ classifiers = [
 dependencies = []  # stdlib only — the only external requirement is the `ssh` binary
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0", "ruff"]
+dev = ["pytest>=7.0", "ruff", "mypy"]
+docs = ["sphinx>=7.2", "furo>=2024.8.6", "myst-parser>=3.0"]
 
 [project.urls]
 Homepage = "https://github.com/mfat/mfatsftp"
@@ -47,11 +48,19 @@ core-metadata-version = "2.4"
 
 [tool.hatch.build.targets.sdist]
 core-metadata-version = "2.4"
-include = ["src", "tests", "examples", "docs", "README.md", "CHANGELOG.md", "LICENSE"]
+include = [
+    "src", "tests", "examples", "docs", "README.md", "CHANGELOG.md", "CONTRIBUTING.md",
+    "SECURITY.md", "LICENSE",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src", "."]
+
+[tool.mypy]
+strict = true
+python_version = "3.9"
+files = ["src/mfatsftp"]
 
 [tool.ruff]
 line-length = 110

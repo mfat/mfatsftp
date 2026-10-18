@@ -20,7 +20,7 @@ import dataclasses
 import errno as _errno
 import stat as _stat
 import struct
-from typing import Dict, List, NamedTuple, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple, Union, cast
 
 PROTOCOL_VERSION = 3
 
@@ -135,7 +135,7 @@ class SFTPError(IOError):
         self.message = message
         self.errno = _FX_ERRNO.get(code, _errno.EIO)
 
-    def __reduce__(self):
+    def __reduce__(self) -> Tuple[Any, ...]:
         return (SFTPError, (self.code, self.message))
 
 
@@ -164,9 +164,11 @@ class SFTPTimeoutError(SFTPError, TimeoutError):
         self.errno = _errno.ETIMEDOUT
 
     def __new__(cls, code: int = FX_FAILURE, message: str = "") -> "SFTPTimeoutError":
-        return super().__new__(cls, code, message or "SFTP request timed out")
+        return cast(
+            "SFTPTimeoutError", super().__new__(cls, code, message or "SFTP request timed out")
+        )
 
-    def __reduce__(self):
+    def __reduce__(self) -> Tuple[Any, ...]:
         return (SFTPTimeoutError, (self.code, self.message))
 
 
@@ -202,7 +204,7 @@ class SFTPAttributes:
     attr: Dict[str, bytes] = dataclasses.field(default_factory=dict)
 
     @classmethod
-    def from_stat(cls, obj, filename: Optional[str] = None) -> "SFTPAttributes":
+    def from_stat(cls, obj: Any, filename: Optional[str] = None) -> "SFTPAttributes":
         """Build attributes from an :func:`os.stat` result (paramiko-compatible)."""
         return cls(
             st_size=int(obj.st_size),
@@ -243,7 +245,7 @@ def pack_uint64(value: int) -> bytes:
     return struct.pack(">Q", value & 0xFFFFFFFFFFFFFFFF)
 
 
-def pack_string(value) -> bytes:
+def pack_string(value: Union[str, bytes]) -> bytes:
     if isinstance(value, str):
         # surrogateescape restores the raw bytes of a name that was not valid
         # UTF-8 when the server sent it (see ``_Reader.text``).
@@ -259,12 +261,12 @@ class _Reader:
         self._pos = 0
 
     def uint32(self) -> int:
-        v = struct.unpack_from(">I", self._data, self._pos)[0]
+        v: int = struct.unpack_from(">I", self._data, self._pos)[0]
         self._pos += 4
         return v
 
     def uint64(self) -> int:
-        v = struct.unpack_from(">Q", self._data, self._pos)[0]
+        v: int = struct.unpack_from(">Q", self._data, self._pos)[0]
         self._pos += 8
         return v
 
@@ -467,4 +469,5 @@ def parse_attrs(payload: bytes) -> Tuple[int, SFTPAttributes]:
 def response_request_id(ptype: int, payload: bytes) -> int:
     """Every post-INIT response begins with the request id."""
 
-    return struct.unpack_from(">I", payload, 0)[0]
+    request_id: int = struct.unpack_from(">I", payload, 0)[0]
+    return request_id

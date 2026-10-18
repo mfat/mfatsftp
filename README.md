@@ -28,7 +28,7 @@ with mfatsftp.connect("user@host") as sftp:
 - [Errors](#errors)
 - [Performance](#performance)
 - [Coming from paramiko](#coming-from-paramiko)
-- [API reference](docs/api.md)
+- [API reference](docs/api.md) (full reference generated from the docstrings: build `docs/` with Sphinx)
 - [Development](#development)
 - [License](#license)
 
@@ -43,7 +43,10 @@ with mfatsftp.connect("user@host") as sftp:
   close to a drop-in replacement. If you use the rest of paramiko, it isn't.
 - **Linux and macOS** are the supported platforms. Windows OpenSSH may work
   but is not tested yet.
-- Any SFTP v3 server works. OpenSSH servers also get the extras listed
+- **Servers:** written for any SFTP v3 server and tested against OpenSSH's
+  `sftp-server`. It copes with servers that lack OpenSSH's extensions
+  (renames fall back, chunks drop to 32 KiB) or return short reads.
+  OpenSSH servers also get the extras listed
   [below](#server-extensions).
 
 ## Installation
@@ -52,7 +55,7 @@ with mfatsftp.connect("user@host") as sftp:
 pip install mfatsftp
 ```
 
-Or from a checkout: `pip install .`
+The latest development version: `pip install git+https://github.com/mfat/mfatsftp`
 
 ## Connecting
 
@@ -150,14 +153,15 @@ with sftp.open("/tmp/export.csv", "w", bufsize=65536) as f:   # buffer small wri
 
 By default each `write()` waits for the server to confirm it, which costs a
 round trip per call. When you write many small pieces, open with a `bufsize`
-or call `f.set_pipelined()`. Errors then surface at `flush()` or `close()`.
+or call `f.set_pipelined()`. A write error then surfaces at the next
+`flush()`, read, seek or `close()` instead.
 
 ### Safe replacement
 
 Plain SFTP `rename` fails if the destination exists. To replace a file
 atomically, write a temporary file and use `atomic_rename`. It uses OpenSSH's
-`posix-rename` when the server has it, and falls back to remove + rename when
-it doesn't:
+`posix-rename` when the server has it. Otherwise it falls back to remove +
+rename, which is not atomic: the destination is briefly missing.
 
 ```python
 with sftp.open("/srv/app/config.tmp", "w") as f:
@@ -183,7 +187,7 @@ sftp.rmtree("/srv/a")                   # like rm -r; never follows symlinks
 Whole trees, with progress over the entire transfer:
 
 ```python
-sftp.put_dir("build/", "/var/www/site")     # keeps permissions and mtimes
+sftp.put_dir("build/", "/var/www/site")     # keeps permission bits and mtimes
 sftp.get_dir("/var/www/site", "backup/")
 ```
 
@@ -223,7 +227,7 @@ Check with the matching `supports_*()` method:
 | `copy(src, dst)` | `copy-data` (OpenSSH 9.0+) | copy on the server, with no data crossing the network (falls back to read + write) |
 | `hardlink(old, new)` | `hardlink@openssh.com` | create a hard link |
 | `statvfs(path)` | `statvfs@openssh.com` | free and total space, like `os.statvfs` |
-| `users_groups_by_id(uids, gids)` | `users-groups-by-id@openssh.com` (OpenSSH 9.6+) | user and group names on the server |
+| `users_groups_by_id(uids, gids)` | `users-groups-by-id@openssh.com` (OpenSSH 9.1+) | user and group names on the server |
 | (automatic) | `limits@openssh.com` | larger read/write chunks |
 
 ### Filenames that aren't UTF-8
@@ -263,6 +267,7 @@ exception, so ordinary Python handling works:
 | no such file | `SFTPNoSuchFileError`, also a `FileNotFoundError` |
 | permission denied | `SFTPPermissionError`, also a `PermissionError` |
 | connection lost / closed | `SFTPConnectionError`, also a `ConnectionError` |
+| no reply within `settimeout()` | `SFTPTimeoutError`, also a `TimeoutError` |
 | anything else | `SFTPError` |
 
 ```python
@@ -272,9 +277,11 @@ except FileNotFoundError:
     pass
 ```
 
-Connection setup raises `PermissionError` (authentication failed),
-`TimeoutError` (`timeout` expired), or `OSError` carrying ssh's error message
-(unknown host, refused connection, no SFTP subsystem, …).
+Connection setup raises `PermissionError` (authentication failed, as
+recognised from ssh's message), `TimeoutError` (`timeout` expired), or
+`OSError` carrying ssh's error message (unknown host, refused connection, no
+SFTP subsystem, …). A host that is empty or starts with `-` raises
+`ValueError` before anything runs: ssh would read it as an option.
 
 ## Performance
 
@@ -296,14 +303,15 @@ is mostly round trips. mfatsftp hides as many of them as it can:
   built on them, so a tree of many small files costs a few round trips per
   directory level instead of several per file.
 
-For example, reading and then rewriting a 1 MiB file takes about 7 round trips
-instead of more than 64. Deleting a tree of 81 directories takes about 14
-instead of about 500. The test suite checks numbers like these.
+For example, against OpenSSH's `sftp-server`, reading and then rewriting a
+1 MiB file takes about 7 round trips instead of more than 64 one request at
+a time. Deleting a tree of 81 directories takes about 14 instead of about 500.
+The test suite checks numbers like these.
 
 ## Coming from paramiko
 
 All of paramiko's file-operation methods exist here with the same names and
-arguments: `open`/`file`
+argument order: `open`/`file`
 (including `bufsize`), `stat`/`lstat`, `listdir`/`listdir_attr`/
 `listdir_iter`, `mkdir`/`rmdir`, `remove`/`unlink`, `rename`/`posix_rename`,
 `chmod`/`chown`/`utime`/`truncate`, `symlink`/`readlink`, `normalize`,
@@ -319,13 +327,17 @@ Differences:
   and there's no `from_transport`/`get_channel`. Each client runs its own
   `ssh`; OpenSSH's `ControlMaster`/`ControlPersist` options let several share
   one login.
+- A few keyword names differ: `open(path, …)` (paramiko: `filename`),
+  `rename`/`posix_rename(old, new)` (`oldpath`, `newpath`) and
+  `symlink(target_path, link_path)` (`source`, `dest`). Positional calls work
+  unchanged.
 - `put`/`putfo` default to `confirm=False`; pass `confirm=True` to check the
   remote size afterwards. `get`/`put`/`getfo`/`putfo` return the number of
   bytes transferred.
 - Unset attribute fields: paramiko uses `None` for `st_size`/`st_mode`,
   mfatsftp uses `0`.
-- `SFTPFile.check()` (the `check-file` hash extension) isn't implemented;
-  OpenSSH doesn't support it.
+- `SFTPFile.check()` (the `check-file` hash extension, which OpenSSH
+  doesn't support) and the legacy `xreadlines()` aren't implemented.
 - At EOF, the low-level `SFTPClient.read(handle, …)` returns `b""` rather
   than raising `EOFError` (`SFTPFile` behaves the same in both).
 - Errors are `SFTPError` subclasses that are also `FileNotFoundError`,
@@ -335,10 +347,14 @@ Differences:
 
 ## Development
 
+See [CONTRIBUTING.md](https://github.com/mfat/mfatsftp/blob/main/CONTRIBUTING.md) for the full guide. In short:
+
 ```sh
 pip install -e .[dev]
 pytest           # unit tests + tests against the local OpenSSH sftp-server
 ruff check src tests examples
+mypy             # strict type check
+pip install -r docs/requirements.txt && sphinx-build -b html docs docs/_build/html
 ```
 
 Most tests run the client against the real OpenSSH `sftp-server` binary over
@@ -350,13 +366,16 @@ pipes. They are skipped if it's not installed (Debian/Ubuntu package:
 MFATSFTP_TEST_HOST=localhost pytest tests/test_live_ssh.py
 ```
 
+To report a security problem, see
+[SECURITY.md](https://github.com/mfat/mfatsftp/blob/main/SECURITY.md).
+
 The SFTP code is shared with [sshPilot](https://github.com/mfat/sshpilot)'s
 file manager, where it was first developed.
 
 ## License
 
 GNU General Public License v3.0 or later (GPL-3.0-or-later). See
-[LICENSE](LICENSE).
+[LICENSE](https://github.com/mfat/mfatsftp/blob/main/LICENSE).
 
 > GPLv3 is a strong copyleft license. Software that distributes or links
 > against `mfatsftp` must itself be GPL-compatible, which is a stronger

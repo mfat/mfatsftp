@@ -18,7 +18,7 @@ Remote paths are `str` and always use `/`. Local paths can be `str` or
   - [Low-level handle I/O](#low-level-handle-io)
 - [`SFTPFile`](#sftpfile)
 - [`SFTPAttributes`](#sftpattributes), [`SFTPStatVFS`](#sftpstatvfs)
-- [`AtomicUploadItem`](#atomicuploaditem), [`PipelinedWriter`](#pipelinedwriter)
+- [`AtomicUploadItem`](#atomicuploaditem), [`PipelinedWriter`](#pipelinedwriter), [`ProgressCallback`](#progresscallback)
 - [Exceptions](#exceptions)
 - [`mfatsftp.protocol`](#mfatsftpprotocol)
 
@@ -49,6 +49,9 @@ of the command, such as an `sshpass` wrapper for password auth.
 
 Raises `PermissionError` when authentication fails, `TimeoutError`, or
 `OSError` carrying ssh's error output for any other failure.
+
+`connect`/`build_ssh_argv` raise `ValueError` for an empty host or one that
+starts with `-` (ssh would read it as an option).
 
 ### `build_ssh_argv(host, **options) -> list[str]`
 
@@ -317,6 +320,17 @@ with sftp.open("/tmp/out", "wb") as f:
 | `flush()` | Wait until every write is confirmed. Call it before closing the handle. |
 | `offset` | Where the next write lands. |
 | `peak_pending` | Largest window reached (diagnostics). |
+
+## `ProgressCallback`
+
+The type of every transfer `callback`: `Callable[[int, int], None]`, called
+as `callback(bytes_done, bytes_total)`. `bytes_total` is 0 when the size is
+unknown. Use it to annotate your own callbacks:
+
+```python
+def show(done: int, total: int) -> None: ...
+callback: mfatsftp.ProgressCallback = show
+```
 
 ---
 

@@ -17,7 +17,7 @@ import logging
 import os
 import subprocess
 import threading
-from typing import List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence
 
 from .client import SFTPClient
 
@@ -44,7 +44,8 @@ def build_ssh_argv(
     command line.
 
     :param host: ``"user@hostname"``, ``"hostname"`` or a ``~/.ssh/config``
-        alias.
+        alias. A host starting with ``-`` is refused, since ssh would read
+        it as an option (e.g. ``-oProxyCommand=…`` runs a local command).
     :param port: ``-p``.
     :param identity: private key file, ``-i`` (``~`` is expanded).
     :param config: ssh config file, ``-F`` (``~`` is expanded).
@@ -56,7 +57,10 @@ def build_ssh_argv(
         (recommended for unattended scripts).
     :param ssh_path: the ssh executable.
     :param extra_args: extra arguments inserted before ``-s`` (e.g. ``["-v"]``).
+    :raises ValueError: *host* is empty or starts with ``-``.
     """
+    if not host or host.startswith("-"):
+        raise ValueError(f"invalid host {host!r}: must not be empty or start with '-'")
     argv: List[str] = [ssh_path]
     if config:
         argv += ["-F", os.path.expanduser(config)]
@@ -79,7 +83,7 @@ def build_ssh_argv(
     return argv
 
 
-def _terminate_proc(proc: subprocess.Popen) -> None:
+def _terminate_proc(proc: "subprocess.Popen[bytes]") -> None:
     """Stop the ssh subprocess (EOFs its pipes so the reader/stderr threads
     unblock). Idempotent and quiet."""
     if proc is None:
@@ -99,7 +103,8 @@ class _ProcessSFTPClient(SFTPClient):
     process's own pipe objects (so their finalizers can't double-close fds).
     """
 
-    def __init__(self, proc: subprocess.Popen, stderr_lines: List[str]) -> None:
+    def __init__(self, proc: "subprocess.Popen[bytes]", stderr_lines: List[str]) -> None:
+        assert proc.stdin is not None and proc.stdout is not None  # opened with PIPE
         super().__init__(proc.stdin, proc.stdout, on_close=lambda: _terminate_proc(proc))
         self._proc = proc
         self._stderr_lines = stderr_lines
@@ -136,7 +141,7 @@ def _classify_handshake_failure(text: str, exc: Exception) -> Exception:
 def from_command(
     argv: Sequence[str],
     *,
-    env: Optional[dict] = None,
+    env: Optional[Dict[str, str]] = None,
     timeout: Optional[float] = None,
 ) -> SFTPClient:
     """Spawn *argv* (which must speak the SFTP subsystem on stdin/stdout) and
@@ -170,8 +175,10 @@ def from_command(
     stderr_lines: List[str] = []
 
     def _drain() -> None:
+        stderr = proc.stderr
+        assert stderr is not None  # opened with stderr=PIPE
         try:
-            for raw in iter(proc.stderr.readline, b""):
+            for raw in iter(stderr.readline, b""):
                 line = raw.decode("utf-8", "replace").rstrip()
                 if line:
                     stderr_lines.append(line)
@@ -231,7 +238,7 @@ def connect(
     batch_mode: bool = False,
     ssh_path: str = "ssh",
     extra_args: Optional[Sequence[str]] = None,
-    env: Optional[dict] = None,
+    env: Optional[Dict[str, str]] = None,
     timeout: Optional[float] = None,
 ) -> SFTPClient:
     """Connect to *host* over SFTP via the system OpenSSH.

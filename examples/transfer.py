@@ -14,7 +14,7 @@ import time
 import mfatsftp
 
 
-def _progress():
+def _progress() -> mfatsftp.ProgressCallback:
     started = time.monotonic()
 
     def report(done: int, total: int) -> None:

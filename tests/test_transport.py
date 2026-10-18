@@ -40,3 +40,11 @@ def test_extra_args_passed_through_before_subsystem():
     argv = build_ssh_argv("host", extra_args=["-v"])
     assert "-v" in argv
     assert argv.index("-v") < argv.index("-s")
+
+
+def test_host_that_looks_like_an_option_is_refused():
+    import pytest
+
+    for host in ("-oProxyCommand=touch /tmp/pwned", "-v", ""):
+        with pytest.raises(ValueError):
+            build_ssh_argv(host)

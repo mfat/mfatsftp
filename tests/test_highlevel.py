@@ -13,6 +13,7 @@ import pytest
 import mfatsftp
 from mfatsftp import protocol as proto
 from tests.real_server import (
+    SFTP_SERVER,
     measures_round_trips,
     requires_sftp_server,
     start_client,
@@ -390,3 +391,21 @@ def test_requests_after_close_raise_connection_error(tmp_path):
     with pytest.raises(ConnectionError) as exc:
         sftp.stat(str(tmp_path))
     assert isinstance(exc.value, mfatsftp.SFTPConnectionError)
+
+
+def test_put_dir_keeps_exact_permissions_despite_the_server_umask(tmp_path):
+    # The server's umask strips bits from a file's create mode; put_dir must
+    # still give every file, small or large, exactly the local permissions.
+    local = tmp_path / "local"
+    local.mkdir()
+    (local / "small").write_bytes(b"s")
+    (local / "large").write_bytes(os.urandom(600_000))
+    for name in ("small", "large"):
+        os.chmod(local / name, 0o664)
+    sftp, process, stdout = start_client(argv=["/bin/sh", "-c", f'umask 077 && exec "{SFTP_SERVER}"'])
+    try:
+        sftp.put_dir(local, str(tmp_path / "remote"))
+    finally:
+        stop_client(sftp, process, stdout)
+    for name in ("small", "large"):
+        assert stat.S_IMODE((tmp_path / "remote" / name).stat().st_mode) == 0o664, name
