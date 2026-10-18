@@ -26,6 +26,7 @@ from mfatsftp.client import (
 )
 from tests.real_server import (
     limited_handles_argv,
+    measures_round_trips,
     requires_sftp_server,
     start_client,
     stop_client,
@@ -120,6 +121,7 @@ def test_write_error_surfaces_once_all_chunks_settle(client, tmp_path):
     assert client.stat(str(path)).st_size == 0
 
 
+@measures_round_trips
 def test_save_over_a_slow_link_takes_a_few_round_trips(tmp_path):
     """Read then rewrite 1 MiB, as an editor save does, at 200 ms per round
     trip. One request per 32 KiB chunk made this 64+ round trips (~13 s)."""
@@ -249,6 +251,7 @@ def test_adaptive_pipeline_never_shrinks_below_initial():
     assert pipeline.max_pending == _INITIAL_PIPELINE_DEPTH
 
 
+@measures_round_trips
 def test_adaptive_read_grows_window_over_a_slow_link(tmp_path):
     """Multi-MiB download on a slow link must raise outstanding depth above 16.
 
@@ -278,6 +281,7 @@ def test_adaptive_read_grows_window_over_a_slow_link(tmp_path):
     assert round_trips < 10, f"adaptive read took {round_trips:.1f} round trips"
 
 
+@measures_round_trips
 def test_read_capped_below_the_advertised_limit_follows_up_in_parallel(tmp_path):
     """Win32-OpenSSH advertises 255 KiB READs but answers at most 100 KiB.
 
@@ -305,6 +309,7 @@ def test_read_capped_below_the_advertised_limit_follows_up_in_parallel(tmp_path)
     assert round_trips < 9, f"capped read took {round_trips:.1f} round trips"
 
 
+@measures_round_trips
 def test_adaptive_write_grows_window_over_a_slow_link(tmp_path):
     delay = 0.05
     size = 2 * 1024 * 1024
@@ -363,6 +368,7 @@ def test_tiny_read_does_not_grow_the_pipeline(client, tmp_path):
     assert client.last_transfer_peak_pending == _INITIAL_PIPELINE_DEPTH
 
 
+@measures_round_trips
 def test_listing_a_large_directory_over_a_slow_link(tmp_path):
     """2500 entries are ~25 READDIR batches from OpenSSH; one request at a
     time made that ~27 round trips."""
@@ -381,6 +387,7 @@ def test_listing_a_large_directory_over_a_slow_link(tmp_path):
     assert round_trips < 10, f"listing took {round_trips:.1f} round trips"
 
 
+@measures_round_trips
 def test_atomic_upload_many_hides_rtt_for_small_files(tmp_path):
     """Fifty tiny files must share control-plane RTTs, not pay six each.
 
@@ -547,6 +554,7 @@ def test_listdir_many_matches_listdir_attr(client, tmp_path):
     assert len(client.listdir_many(dirs[1:2])[0]) == 90
 
 
+@measures_round_trips
 def test_listdir_many_over_a_slow_link_lists_a_level_together(tmp_path):
     delay = 0.05
     dirs = []

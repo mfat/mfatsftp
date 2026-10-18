@@ -14,6 +14,7 @@ import heapq
 import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
 
@@ -37,6 +38,14 @@ SFTP_SERVER = next(
 
 requires_sftp_server = pytest.mark.skipif(
     SFTP_SERVER is None, reason="OpenSSH sftp-server not installed"
+)
+
+# Round-trip counts measured through ``_DelayLine`` are only reliable on Linux:
+# on macOS CI runners the simulated link itself adds latency, so the same
+# transfers measure several round trips too many. The operations these tests
+# time are covered for correctness on every platform by the undelayed tests.
+measures_round_trips = pytest.mark.skipif(
+    sys.platform != "linux", reason="simulated-latency timing is only reliable on Linux"
 )
 
 

@@ -12,7 +12,12 @@ import pytest
 
 import mfatsftp
 from mfatsftp import protocol as proto
-from tests.real_server import requires_sftp_server, start_client, stop_client
+from tests.real_server import (
+    measures_round_trips,
+    requires_sftp_server,
+    start_client,
+    stop_client,
+)
 
 pytestmark = requires_sftp_server
 
@@ -190,6 +195,7 @@ def test_rmtree_on_a_file_or_symlink(client, tmp_path):
         client.rmtree(str(tmp_path / "missing"))
 
 
+@measures_round_trips
 def test_rmtree_over_a_slow_link_costs_round_trips_per_level(tmp_path):
     root = tmp_path / "tree"
     root.mkdir()
@@ -349,8 +355,11 @@ def test_symlink_and_readlink_on_openssh(client, tmp_path):
 
 def test_names_that_are_not_utf8_round_trip(client, tmp_path):
     raw = b"caf\xe9.txt"  # Latin-1, not valid UTF-8
-    with open(os.path.join(os.fsencode(tmp_path), raw), "wb") as fh:
-        fh.write(b"data")
+    try:
+        with open(os.path.join(os.fsencode(tmp_path), raw), "wb") as fh:
+            fh.write(b"data")
+    except OSError as exc:  # macOS (APFS) only accepts UTF-8 names
+        pytest.skip(f"local filesystem rejects non-UTF-8 names: {exc}")
     (name,) = client.listdir(str(tmp_path))
     assert os.fsencode(name) == raw
     remote = str(tmp_path) + "/" + name
