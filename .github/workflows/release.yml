@@ -1,9 +1,16 @@
 name: Release
 
-# Publishes to PyPI when a version tag (e.g. v0.2.0) is pushed. Uses PyPI
-# trusted publishing: configure it once at
-# https://pypi.org/manage/account/publishing/ (project mfatsftp, workflow
-# release.yml, environment pypi) before pushing the first tag.
+# Runs when a version tag (e.g. v0.4.0) is pushed:
+#   build           build and check the wheel and sdist
+#   github-release  always: create the GitHub release (notes from CHANGELOG.md)
+#   publish         only when the repository variable PYPI_PUBLISH is "true":
+#                   upload to PyPI with trusted publishing. Set that up once at
+#                   https://pypi.org/manage/account/publishing/ (project
+#                   mfatsftp, workflow release.yml, environment pypi), then set
+#                   PYPI_PUBLISH under Settings > Secrets and variables >
+#                   Actions > Variables.
+# The two release jobs are independent, so a PyPI problem never blocks the
+# GitHub release.
 
 on:
   push:
@@ -29,8 +36,48 @@ jobs:
           name: dist
           path: dist/
 
+  github-release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Release notes from CHANGELOG.md
+        run: |
+          python - <<'EOF'
+          import os, pathlib, re
+          version = os.environ["GITHUB_REF_NAME"].removeprefix("v")
+          text = pathlib.Path("CHANGELOG.md").read_text(encoding="utf-8")
+          match = re.search(rf"^## \[{re.escape(version)}\][^\n]*\n(.*?)(?=^## \[|\Z)", text, re.S | re.M)
+          if not match:
+              raise SystemExit(f"CHANGELOG.md has no section for {version}")
+          notes = match.group(1).strip()
+          notes += (
+              "\n\n### Install\n\n```sh\n"
+              f"pip install git+https://github.com/{os.environ['GITHUB_REPOSITORY']}@v{version}\n"
+              "```\n\nor install the wheel attached below.\n"
+          )
+          pathlib.Path("notes.md").write_text(notes, encoding="utf-8")
+          EOF
+      - name: Create or update the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --verify-tag \
+              --title "mfatsftp ${GITHUB_REF_NAME#v}" --notes-file notes.md
+          fi
+
   publish:
     needs: build
+    if: vars.PYPI_PUBLISH == 'true'
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -41,18 +88,3 @@ jobs:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
-
-  github-release:
-    needs: publish
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: dist
-          path: dist/
-      - name: Create GitHub release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes

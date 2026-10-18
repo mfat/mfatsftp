@@ -65,6 +65,19 @@ MFATSFTP_TEST_HOST=localhost pytest tests/test_live_ssh.py
   standard library, and it should stay that way.
 - **Compatibility:** Python 3.9+ on Linux and macOS.
 
+## Releasing
+
+1. Move the "Unreleased" changelog entries under a new `## [X.Y.Z] - date`
+   heading and set the same version in `pyproject.toml` and
+   `src/mfatsftp/__init__.py`.
+2. Commit, push, and wait for CI to pass.
+3. Tag and push: `git tag -a vX.Y.Z -m "mfatsftp X.Y.Z" && git push origin vX.Y.Z`.
+
+The release workflow then builds the package and creates the GitHub release,
+with notes taken from the changelog. Publishing to PyPI is a separate step that
+only runs when the repository variable `PYPI_PUBLISH` is `true`; it is off
+while PyPI publishing is still planned.
+
 ## Reporting bugs
 
 Open an issue with your Python version, OS, `ssh -V` output, the server

@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+- Release workflow: a version tag always creates the GitHub release, with
+  notes from the changelog. Publishing to PyPI is a separate job that only
+  runs when the repository variable `PYPI_PUBLISH` is `true`, so it can no
+  longer block the GitHub release.
+
 ## [0.3.0] - 2026-10-18
 
 paramiko parity for the SFTP client, a documentation site, strict typing, and
