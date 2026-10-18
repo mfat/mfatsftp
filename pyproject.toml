@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mfatsftp"
-version = "0.3.0"
+version = "0.3.1"
 description = "Pure-Python SFTP client that speaks through your system OpenSSH (no crypto to maintain)."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -59,7 +59,6 @@ pythonpath = ["src", "."]
 
 [tool.mypy]
 strict = true
-python_version = "3.9"
 files = ["src/mfatsftp"]
 
 [tool.ruff]

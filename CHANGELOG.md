@@ -6,11 +6,23 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-18
+
+Documentation and packaging only; the library code is unchanged from 0.3.0.
+
+### Fixed
+- The README's link to the API reference was relative, so it led nowhere on
+  the PyPI project page. All README links are now absolute or in-page, and a
+  test enforces that.
+
 ### Changed
+- README: install from PyPI (`pip install mfatsftp`), with PyPI, Python
+  version, license and CI badges.
 - Release workflow: a version tag always creates the GitHub release, with
   notes from the changelog. Publishing to PyPI is a separate job that only
   runs when the repository variable `PYPI_PUBLISH` is `true`, so it can no
-  longer block the GitHub release.
+  longer block the GitHub release. It can also be run by hand for an existing
+  tag.
 
 ## [0.3.0] - 2026-10-18
 
@@ -139,7 +151,8 @@ convenience API a standalone library needs, and documents all of it.
   OpenSSH (`ssh -s <host> sftp`), with clean subprocess teardown.
 - In-memory SFTP server test fixture; protocol, client and transport test suites.
 
-[Unreleased]: https://github.com/mfat/mfatsftp/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/mfat/mfatsftp/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/mfat/mfatsftp/releases/tag/v0.3.1
 [0.3.0]: https://github.com/mfat/mfatsftp/releases/tag/v0.3.0
 [0.2.0]: https://github.com/mfat/mfatsftp/commit/09978e8
 [0.1.0]: https://github.com/mfat/mfatsftp/commit/aa26356
