@@ -76,3 +76,13 @@ def test_doc_snippets_compile(source):
 def test_version_matches_changelog():
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     assert f"## [{mfatsftp.__version__}]" in changelog
+
+
+def test_readme_links_work_on_pypi():
+    # PyPI shows the README at pypi.org/project/mfatsftp/, where a relative
+    # link such as docs/api.md resolves to a page that does not exist. Only
+    # absolute URLs and in-page #anchors work there.
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    targets = re.findall(r"\]\(([^)\s]+)", readme)
+    relative = [t for t in targets if not t.startswith(("http://", "https://", "#"))]
+    assert not relative, f"relative links break on PyPI: {relative}"

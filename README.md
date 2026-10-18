@@ -33,7 +33,7 @@ with mfatsftp.connect("user@host") as sftp:
 - [Errors](#errors)
 - [Performance](#performance)
 - [Coming from paramiko](#coming-from-paramiko)
-- [API reference](docs/api.md) (full reference generated from the docstrings: build `docs/` with Sphinx)
+- [API reference](https://github.com/mfat/mfatsftp/blob/main/docs/api.md) (full reference generated from the docstrings: build `docs/` with Sphinx)
 - [Development](#development)
 - [License](#license)
 
