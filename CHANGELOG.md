@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-10-19
+
+Licensing only; the library code is unchanged from 0.3.1.
+
 ### Changed
 - License changed from GPL-3.0-or-later back to MIT, so mfatsftp can be
   used in any project, including closed-source ones.
@@ -155,7 +159,8 @@ convenience API a standalone library needs, and documents all of it.
   OpenSSH (`ssh -s <host> sftp`), with clean subprocess teardown.
 - In-memory SFTP server test fixture; protocol, client and transport test suites.
 
-[Unreleased]: https://github.com/mfat/mfatsftp/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/mfat/mfatsftp/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/mfat/mfatsftp/releases/tag/v0.3.2
 [0.3.1]: https://github.com/mfat/mfatsftp/releases/tag/v0.3.1
 [0.3.0]: https://github.com/mfat/mfatsftp/releases/tag/v0.3.0
 [0.2.0]: https://github.com/mfat/mfatsftp/commit/09978e8
