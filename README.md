@@ -382,9 +382,5 @@ file manager, where it was first developed.
 
 ## License
 
-GNU General Public License v3.0 or later (GPL-3.0-or-later). See
+MIT License. See
 [LICENSE](https://github.com/mfat/mfatsftp/blob/main/LICENSE).
-
-> GPLv3 is a strong copyleft license. Software that distributes or links
-> against `mfatsftp` must itself be GPL-compatible, which is a stronger
-> requirement than paramiko's LGPL.

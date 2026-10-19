@@ -85,4 +85,4 @@ software if known, and a minimal script that shows the problem. For security
 problems, see [SECURITY.md](https://github.com/mfat/mfatsftp/blob/main/SECURITY.md) instead.
 
 By contributing you agree that your contributions are licensed under the
-project's license (GPL-3.0-or-later).
+project's license (MIT).

@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+- License changed from GPL-3.0-or-later back to MIT, so mfatsftp can be
+  used in any project, including closed-source ones.
+
 ## [0.3.1] - 2026-10-18
 
 Documentation and packaging only; the library code is unchanged from 0.3.0.
